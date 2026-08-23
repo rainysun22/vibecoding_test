@@ -7,11 +7,11 @@ function renderSettings(){
   <div class="grid2">
     <div class="card">
       <h2 class="sect">🎯 学习计划</h2>
-      <label class="muted" style="font-size:13px">每日新词数（词库共 ${TOTAL} 词，14天需 ≥ ${Math.ceil(TOTAL/14)} 词/天）</label>
+      <label class="muted" style="font-size:13px">每日新词数（词库共 ${TOTAL} 词，${PLAN_DAYS}天需 ≥ ${Math.ceil(TOTAL/PLAN_DAYS)} 词/天）</label>
       <div class="toolbar" style="margin:8px 0 16px">
         <input type="number" id="setDaily" min="10" max="2000" value="${planQuota()}" style="width:120px">
         <button class="btn primary" onclick="savePlan()">保存</button>
-        <button class="btn ghost" onclick="$('#setDaily').value=${Math.ceil(TOTAL/14)}">恢复推荐值(${Math.ceil(TOTAL/14)})</button>
+        <button class="btn ghost" onclick="$('#setDaily').value=${Math.ceil(TOTAL/PLAN_DAYS)}">恢复推荐值(${Math.ceil(TOTAL/PLAN_DAYS)})</button>
       </div>
       <label class="muted" style="font-size:13px">冲刺开始日期（Day 1）</label>
       <div class="toolbar" style="margin:8px 0 4px">
@@ -35,7 +35,8 @@ function renderSettings(){
     </div>
     <div class="card">
       <h2 class="sect">💾 数据</h2>
-      <p class="muted" style="font-size:13px;margin-top:0">进度保存在本浏览器，占用 ${(size/1024).toFixed(1)} KB。换电脑/浏览器请导出再导入。</p>
+      <p class="muted" style="font-size:13px;margin-top:0">进度实时保存到<b>服务器数据库(SQLite)</b>，同时在本浏览器留有备份（${(size/1024).toFixed(1)} KB）。清浏览器缓存不会丢进度。</p>
+      <p class="muted" style="font-size:12px;margin:0 0 8px">当前设备号：${deviceId()}</p>
       <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:8px">
         <button class="btn primary" onclick="exportData()">⬇ 导出进度</button>
         <label class="btn ghost" style="cursor:pointer">⬆ 导入进度<input type="file" id="impFile" accept=".json" style="display:none"></label>
@@ -45,9 +46,9 @@ function renderSettings(){
     <div class="card">
       <h2 class="sect">ℹ️ 关于</h2>
       <p class="muted" style="font-size:13.5px;margin-top:0">
-        本站词库覆盖考研英语一大纲词汇 <b>${TOTAL}</b> 词。记忆调度采用艾宾浩斯遗忘曲线
-        （复习间隔 1/2/4/7/15 天）：答「认识」进入下一间隔；「模糊」明天再见；「不认识」本轮重学并从头开始记忆等级。
-        目标节奏：每天 ${planQuota()} 个新词 + 到期复习，14 天完成全部词汇，之后每天复习巩固即可。
+        本站词库覆盖考研英语一大纲词汇 <b>${TOTAL}</b> 词。记忆调度采用高效间隔重复：
+        当天内多轮（10分钟/1小时/4小时）+ 跨天间隔（1/2/4/7天）。答「认识」进入下一间隔；「模糊」降级重来；「不认识」10分钟后重现。
+        目标节奏：每天 ${planQuota()} 个新词 + 到期复习，<b>${PLAN_DAYS} 天</b>完成全部词汇，之后每天复习巩固即可。
       </p>
     </div>
   </div>`;
@@ -92,6 +93,7 @@ function exportData(){
 function resetAll(){
   if(!confirm('确定清空全部学习进度吗？此操作不可恢复（建议先导出备份）')) return;
   if(!confirm('再次确认：真的要全部重来吗？')) return;
+  try{ fetch('/api/progress?device='+encodeURIComponent(deviceId()),{method:'DELETE'}); }catch(e){}
   localStorage.removeItem(SKEY); location.reload();
 }
 window.renderSettings=renderSettings; window.savePlan=savePlan; window.saveStart=saveStart;

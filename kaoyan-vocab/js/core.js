@@ -31,29 +31,55 @@ const ORDER = (()=>{            // 固定洗牌 → 学习顺序(混合字母/�
 })();
 const BYWORD = new Map(WORDS.map(x=>[x.w.toLowerCase(),x]));
 const TOTAL = WORDS.length;
-const PLAN_DAYS = 14;
+const PLAN_DAYS = 7;
 
-/* ---------- 状态 ---------- */
-const SKEY='kaoYanVocab.v1';
+/* ---------- 状态(云端数据库优先，localStorage 兜底) ---------- */
+const SKEY='kaoYanVocab.v1', DEVICE_KEY='kaoYanVocab.device';
 function defaultState(){
   return { version:1, startDate:todayStr(), dailyNew:Math.ceil(TOTAL/PLAN_DAYS),
     autoSpeak:false, dark:false, onboarded:false, words:{}, history:{}, starred:[] };
 }
-let S;
-function load(){ try{ const s=JSON.parse(localStorage.getItem(SKEY)); if(s&&s.version===1) return s; }catch(e){} return null; }
-S = load() || defaultState();
-let saveTimer=null;
-function save(){ clearTimeout(saveTimer); saveTimer=setTimeout(()=>{ try{ localStorage.setItem(SKEY, JSON.stringify(S)); }catch(e){ toast('⚠️ 保存失败：本地存储空间不足'); } },150); }
+function deviceId(){          // 设备标识(存 localStorage)，作为数据库主键
+  let d=localStorage.getItem(DEVICE_KEY);
+  if(!d){ d='dev-'+Date.now().toString(36)+Math.random().toString(36).slice(2,10); localStorage.setItem(DEVICE_KEY,d); }
+  return d;
+}
+function localLoad(){ try{ const s=JSON.parse(localStorage.getItem(SKEY)); if(s&&s.version===1) return s; }catch(e){} return null; }
+async function serverLoad(){
+  try{
+    const r=await fetch('/api/progress?device='+encodeURIComponent(deviceId()));
+    if(r.ok){ const j=await r.json(); if(j&&j.ok&&j.state&&j.state.version===1) return j.state; }
+  }catch(e){}
+  return null;
+}
+let S = localLoad() || defaultState();
+let saveTimer=null, pushTimer=null;
+function save(){              // 双写：localStorage 兜底 + 云端数据库
+  clearTimeout(saveTimer); saveTimer=setTimeout(()=>{ try{ localStorage.setItem(SKEY, JSON.stringify(S)); }catch(e){} },150);
+  clearTimeout(pushTimer); pushTimer=setTimeout(pushState,700);
+}
+function pushState(){
+  try{
+    fetch('/api/progress?device='+encodeURIComponent(deviceId()),
+      { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(S), keepalive:true }).catch(()=>{});
+  }catch(e){}
+}
+window.addEventListener('pagehide',()=>{    // 关页兜底
+  try{ navigator.sendBeacon('/api/progress?device='+encodeURIComponent(deviceId()),
+    new Blob([JSON.stringify(S)],{type:'application/json'})); }catch(e){}
+});
 
-/* ---------- 记忆算法(艾宾浩斯：1/2/4/7/15天) ---------- */
-const INTERVALS=[0,1,2,4,7,15];      // s=1..5 级对应间隔
+/* ---------- 记忆算法(7天高效模式) ----------
+ * 当天内多轮重复(10分钟/1小时/4小时) + 跨天间隔(1/2/4/7天)，s=1..7 级
+ * 「认识」升级进入下一间隔；「模糊」降级重来；「不认识」10分钟后重现 */
+const INTERVALS=[10,60,240,1440,2880,5760,10080];   // 分钟
 function wstate(w){ return S.words[w.toLowerCase()]; }
-function statusOf(w){ const st=wstate(w); if(!st) return 'new'; return st.s>=4?'master':'learn'; }
+function statusOf(w){ const st=wstate(w); if(!st) return 'new'; return st.s>=5?'master':'learn'; }
 function dueTs(st){ return st.d<=Date.now(); }
 function dueList(){                 // 待复习(未到烂熟)
   const now=Date.now(), out=[];
   for(const [k,st] of Object.entries(S.words)){
-    if(st.s<6 && st.d<=now){ const wo=BYWORD.get(k); if(wo) out.push({wo,st}); }
+    if(st.s<7 && st.d<=now){ const wo=BYWORD.get(k); if(wo) out.push({wo,st}); }
   }
   out.sort((a,b)=>a.st.d-b.st.d); return out;
 }
@@ -62,7 +88,7 @@ function newQueue(n){               // 下一批新词(按学习序)
   return out;
 }
 function learnedCount(){ return Object.keys(S.words).length; }
-function masteredCount(){ return Object.values(S.words).filter(s=>s.s>=4).length; }
+function masteredCount(){ return Object.values(S.words).filter(s=>s.s>=5).length; }
 function dayIndex(){ return Math.max(1, daysBetween(S.startDate, todayStr())+1); }
 function planQuota(){ return S.dailyNew || Math.ceil(TOTAL/PLAN_DAYS); }
 
@@ -72,16 +98,16 @@ function grade(wo, g){             // g: again|hard|good
   const k=wo.w.toLowerCase(); let st=S.words[k];
   if(!st){ st=S.words[k]={s:0,d:0,w:0,r:0,t:Date.now()}; bumpHistory('new'); }
   else bumpHistory('rev');
-  if(g==='again'){ st.w++; st.s=0; st.d=Date.now()-1; bumpHistory('again'); }
-  else if(g==='hard'){ st.s=Math.max(1,st.s); st.d=Date.now()+INTERVALS[1]*DAY_MS; }
-  else { st.s=Math.min(6,st.s+1); st.r++; st.d=Date.now()+INTERVALS[Math.min(st.s,5)]*DAY_MS; }
+  if(g==='again'){ st.w++; st.s=1; st.d=Date.now()+INTERVALS[0]*60000; bumpHistory('again'); }
+  else if(g==='hard'){ st.s=Math.max(1,st.s-1); st.d=Date.now()+INTERVALS[st.s-1]*60000; }
+  else { st.s=Math.min(7,st.s+1); st.r++; st.d=Date.now()+INTERVALS[st.s-1]*60000; }
   save(); return st;
 }
 function extraReview(n){           // 额外巩固：随机抽已学词重置到期
   const pool=ORDER.filter(wo=>S.words[wo.w.toLowerCase()]);
   const r=mulberry32(Date.now()%2147483647); let c=0;
   for(let i=pool.length-1;i>0;i--){ const j=Math.floor(r()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
-  pool.slice(0,n).forEach(wo=>{ const st=S.words[wo.w.toLowerCase()]; if(st){ st.d=Date.now()-1; if(st.s>3)st.s=3; } });
+  pool.slice(0,n).forEach(wo=>{ const st=S.words[wo.w.toLowerCase()]; if(st){ st.d=Date.now()-1; if(st.s>2)st.s=2; } });
   save(); return Math.min(n,pool.length);
 }
 
@@ -147,7 +173,9 @@ $('#nav').addEventListener('click',e=>{
   const b=e.target.closest('button[data-view]'); if(b) go(b.dataset.view);
 });
 
-function boot(){
+async function boot(){
+  const sv=await serverLoad();                 // 数据库进度优先
+  if(sv) S=sv; else { const lc=localLoad(); if(lc) S=lc; }
   $('#totalBadge').textContent=`大纲词汇 ${TOTAL} 词 · Day ${Math.min(dayIndex(),PLAN_DAYS)}/${PLAN_DAYS}`;
   applyTheme();
   if(!S.onboarded) showOnboard();

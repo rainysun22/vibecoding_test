@@ -64,7 +64,7 @@ function wordDetail(word){
   openModal(`
     <div class="wd-word">${esc(wo.w)} <button class="f-speak" onclick="speak('${esc(wo.w)}')">🔊</button></div>
     <div class="wd-mean">${esc(wo.m)}</div>
-    ${st?`<p class="muted" style="font-size:13px;margin:0 0 12px">记忆等级 ${st.s}/5 · 记对 ${st.r} 次 · 记错 ${st.w} 次 · 下次复习 ${new Date(st.d).toLocaleDateString()}</p>`:'<p class="muted" style="font-size:13px;margin:0 0 12px">尚未学习</p>'}
+    ${st?`<p class="muted" style="font-size:13px;margin:0 0 12px">记忆等级 ${st.s}/7 · 记对 ${st.r} 次 · 记错 ${st.w} 次 · 下次复习 ${new Date(st.d).toLocaleString()}</p>`:'<p class="muted" style="font-size:13px;margin:0 0 12px">尚未学习</p>'}
     <div class="wd-actions">
       <button class="btn ghost" onclick="starToggle('${esc(wo.w)}');wordDetail('${esc(wo.w)}')">${star?'★ 移出生词本':'☆ 加入生词本'}</button>
       ${st?`<button class="btn ghost" onclick="markMaster('${esc(wo.w)}')">✅ 标记已掌握</button>
@@ -76,7 +76,7 @@ function wordDetail(word){
 
 function markMaster(word){
   const k=word.toLowerCase();
-  S.words[k]={s:6,d:Date.now()+365*DAY_MS,w:S.words[k]?S.words[k].w:0,r:S.words[k]?S.words[k].r:0,t:S.words[k]?S.words[k].t:Date.now()};
+  S.words[k]={s:7,d:Date.now()+365*DAY_MS,w:S.words[k]?S.words[k].w:0,r:S.words[k]?S.words[k].r:0,t:S.words[k]?S.words[k].t:Date.now()};
   save(); toast('✅ 已标记为掌握'); wordDetail(word); if(curView==='browse') renderBrowseList();
 }
 function resetWord(word){
