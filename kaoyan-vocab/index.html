@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>考研英语一 · 14天词汇冲刺</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📚</text></svg>">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">📚</span><div class="brand-txt"><b>考研词汇 · 14天冲刺</b><i id="totalBadge"></i></div></div>
+  <nav id="nav">
+    <button data-view="dash">仪表盘</button>
+    <button data-view="study">背单词</button>
+    <button data-view="browse">词库</button>
+    <button data-view="quiz">自测</button>
+    <button data-view="settings">设置</button>
+  </nav>
+  <div class="top-actions">
+    <button id="themeToggle" class="icon-btn" title="切换深色模式">🌙</button>
+  </div>
+</header>
+<main id="view"></main>
+<footer class="foot">数据保存在本地浏览器(localStorage) · 切换设备请用「设置→导出进度」· 祝你上岸 🎓</footer>
+
+<!-- 引导层 -->
+<div id="onboard" class="overlay hidden">
+  <div class="modal">
+    <h2>🎯 14天背完考研英语一大纲词汇</h2>
+    <p id="obText" class="ob-text"></p>
+    <ul class="ob-tips">
+      <li>每天新词 + 艾宾浩斯复习(1/2/4/7/15天间隔)，记忆留存率最高</li>
+      <li>键盘操作：<kbd>空格</kbd>翻面 · <kbd>1</kbd>不认识 · <kbd>2</kbd>模糊 · <kbd>3</kbd>认识</li>
+      <li>学完当日词量后，用「自测」查漏，错词自动进入复习队列</li>
+    </ul>
+    <div class="modal-actions">
+      <button class="btn primary" id="obStart">开始冲刺 Day 1</button>
+      <button class="btn ghost" id="obSkip">先随便看看</button>
+    </div>
+  </div>
+</div>
+
+<div id="modalRoot"></div>
+<div id="toast" class="toast hidden"></div>
+
+<script src="js/data1.js"></script>
+<script src="js/data2.js"></script>
+<script src="js/data3.js"></script>
+<script src="js/data4.js"></script>
+<script src="js/data5.js"></script>
+<script src="js/data6.js"></script>
+<script src="js/data7.js"></script>
+<script src="js/data8.js"></script>
+<script src="js/data9.js"></script>
+<script src="js/data10.js"></script>
+<script src="js/data11.js"></script>
+<script src="js/data12.js"></script>
+<script src="js/data13.js"></script>
+<script src="js/data14.js"></script>
+<script src="js/data15.js"></script>
+<script src="js/data16.js"></script>
+<script src="js/core.js"></script>
+<script src="js/view-dash.js"></script>
+<script src="js/view-study.js"></script>
+<script src="js/view-browse.js"></script>
+<script src="js/view-quiz.js"></script>
+<script src="js/view-settings.js"></script>
+</body>
+</html>
