@@ -69,17 +69,21 @@ window.addEventListener('pagehide',()=>{    // 关页兜底
     new Blob([JSON.stringify(S)],{type:'application/json'})); }catch(e){}
 });
 
-/* ---------- 记忆算法(7天高效模式) ----------
- * 当天内多轮重复(10分钟/1小时/4小时) + 跨天间隔(1/2/4/7天)，s=1..7 级
- * 「认识」升级进入下一间隔；「模糊」降级重来；「不认识」10分钟后重现 */
-const INTERVALS=[10,60,240,1440,2880,5760,10080];   // 分钟
+/* ---------- 记忆算法(7天无痛 · FSRS-lite + 组块三步法) ----------
+ * 调研依据：FSRS(DSR记忆三变量模型,比SM-2少~25%复习量) + 测试效应(主动回忆优于被动重读)
+ *          + 短时记忆7±2组块 + 先认后拼(再认比拼写认知负荷低)
+ * 每词状态：S=稳定度(天,R降到90%所需时间) D=难度(1-10)
+ * 目标留存率 0.85 → 下次间隔 I = S × ln(.85)/ln(.9) ≈ 1.54S
+ * 答对 S 按难度加权增长(简单词长得快) 答错 S 缩至40%并于10分钟后重现 */
+const TARGET_R=0.85, RET_FACTOR=Math.log(TARGET_R)/Math.log(0.9);   // ≈1.54
+function stabilityGrowth(D){ return Math.min(3, Math.max(1.3, 3.2-0.22*D)); }
 function wstate(w){ return S.words[w.toLowerCase()]; }
-function statusOf(w){ const st=wstate(w); if(!st) return 'new'; return st.s>=5?'master':'learn'; }
+function statusOf(w){ const st=wstate(w); if(!st) return 'new'; return st.S>=7?'master':'learn'; }
 function dueTs(st){ return st.d<=Date.now(); }
-function dueList(){                 // 待复习(未到烂熟)
+function dueList(){                 // 待复习(稳定度不足15天的到期词)
   const now=Date.now(), out=[];
   for(const [k,st] of Object.entries(S.words)){
-    if(st.s<7 && st.d<=now){ const wo=BYWORD.get(k); if(wo) out.push({wo,st}); }
+    if(st.S<15 && st.d<=now){ const wo=BYWORD.get(k); if(wo) out.push({wo,st}); }
   }
   out.sort((a,b)=>a.st.d-b.st.d); return out;
 }
@@ -88,7 +92,7 @@ function newQueue(n){               // 下一批新词(按学习序)
   return out;
 }
 function learnedCount(){ return Object.keys(S.words).length; }
-function masteredCount(){ return Object.values(S.words).filter(s=>s.s>=5).length; }
+function masteredCount(){ return Object.values(S.words).filter(s=>s.S>=7).length; }
 function dayIndex(){ return Math.max(1, daysBetween(S.startDate, todayStr())+1); }
 function planQuota(){ return S.dailyNew || Math.ceil(TOTAL/PLAN_DAYS); }
 
@@ -96,19 +100,39 @@ function planQuota(){ return S.dailyNew || Math.ceil(TOTAL/PLAN_DAYS); }
 function bumpHistory(field){ const k=todayStr(); const h=S.history[k]=S.history[k]||{new:0,rev:0,again:0,ms:0}; h[field]=(h[field]||0)+1; }
 function grade(wo, g){             // g: again|hard|good
   const k=wo.w.toLowerCase(); let st=S.words[k];
-  if(!st){ st=S.words[k]={s:0,d:0,w:0,r:0,t:Date.now()}; bumpHistory('new'); }
+  if(!st){ st=S.words[k]={S:0.6,D:5,d:0,w:0,r:0,t:Date.now()}; bumpHistory('new'); }
   else bumpHistory('rev');
-  if(g==='again'){ st.w++; st.s=1; st.d=Date.now()+INTERVALS[0]*60000; bumpHistory('again'); }
-  else if(g==='hard'){ st.s=Math.max(1,st.s-1); st.d=Date.now()+INTERVALS[st.s-1]*60000; }
-  else { st.s=Math.min(7,st.s+1); st.r++; st.d=Date.now()+INTERVALS[st.s-1]*60000; }
+  if(g==='again'){ st.w++; st.D=Math.min(10,st.D+1); st.S=Math.max(0.35,st.S*0.4); st.d=Date.now()+10*60000; bumpHistory('again'); }
+  else if(g==='hard'){ st.D=Math.min(10,Math.max(1,st.D+0.3)); st.S=Math.max(0.4,st.S*1.2);
+    st.d=Date.now()+Math.max(20*60000, st.S*RET_FACTOR*DAY_MS); }
+  else { st.r++; st.D=Math.max(1,st.D-0.15); st.S=st.S*stabilityGrowth(st.D);
+    st.d=Date.now()+Math.min(60, st.S*RET_FACTOR)*DAY_MS; }
   save(); return st;
+}
+function markEasy(wo){            // 「我会了」：直接进入高稳定度
+  const k=wo.w.toLowerCase();
+  if(!S.words[k]){ S.words[k]={S:12,D:3,d:Date.now()+45*DAY_MS,w:0,r:1,t:Date.now()}; bumpHistory('new'); save(); }
 }
 function extraReview(n){           // 额外巩固：随机抽已学词重置到期
   const pool=ORDER.filter(wo=>S.words[wo.w.toLowerCase()]);
-  const r=mulberry32(Date.now()%2147483647); let c=0;
+  const r=mulberry32(Date.now()%2147483647);
   for(let i=pool.length-1;i>0;i--){ const j=Math.floor(r()*(i+1)); [pool[i],pool[j]]=[pool[j],pool[i]]; }
-  pool.slice(0,n).forEach(wo=>{ const st=S.words[wo.w.toLowerCase()]; if(st){ st.d=Date.now()-1; if(st.s>2)st.s=2; } });
+  pool.slice(0,n).forEach(wo=>{ const st=S.words[wo.w.toLowerCase()]; if(st){ st.d=Date.now()-1; st.S=Math.min(st.S,1); } });
   save(); return Math.min(n,pool.length);
+}
+/* 旧版进度迁移：等级制{s} → 稳定度制{S,D} */
+function migrateState(st){
+  if(!st||!st.words) return st;
+  for(const k in st.words){
+    const w=st.words[k];
+    if(w.S===undefined){
+      const lv=w.s||0;
+      w.S= lv<=1?0.05 : lv===2?0.1 : lv===3?1 : lv===4?2 : lv===5?4 : lv===6?7 : 10;
+      w.D=Math.min(10,Math.max(1,5+(w.w||0)-(w.r||0)/2));
+      delete w.s;
+    }
+  }
+  return st;
 }
 
 /* ---------- 发音 ---------- */
@@ -128,7 +152,7 @@ function go(v){ location.hash='#/'+v; }
 function route(){
   const h=(location.hash.replace(/^#\//,'')||'dash');
   curView = (VIEW_FN[h] && typeof window[VIEW_FN[h]]==='function') ? h : 'dash';
-  $$('#nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===curView));
+  $$('#nav button,#tabbar button').forEach(b=>b.classList.toggle('active',b.dataset.view===curView));
   const host=$('#view'); host.className='';
   host.classList.add('fade-in');
   setTimeout(()=>host.classList.remove('fade-in'),260);
@@ -161,21 +185,20 @@ $('#themeToggle').addEventListener('click',()=>{ S.dark=!S.dark; save(); applyTh
 /* ---------- 引导 ---------- */
 function showOnboard(){
   const per=Math.ceil(TOTAL/PLAN_DAYS);
-  $('#obText').innerHTML=`词库共 <b>${TOTAL}</b> 词（考研英语一大纲词汇），按 <b>${per} 词/天 × ${PLAN_DAYS} 天</b> 自动分配。每天需要「新词学习 + 到期复习」两个环节，全部完成即达成目标。`;
+  $('#obText').innerHTML=`词库共 <b>${TOTAL}</b> 词（考研英语一大纲词汇），按 <b>${per} 词/天 × ${PLAN_DAYS} 天</b> 自动分配。新词用「组块三步法」学：泛看 → 快测 → 补漏，每组 10 词、全程只需点击；到期复习由 FSRS 智能调度，越熟的词出现越少。`;
   $('#onboard').classList.remove('hidden');
   $('#obStart').onclick=()=>{ S.onboarded=true; S.startDate=todayStr(); S.dailyNew=per; save(); $('#onboard').classList.add('hidden'); go('study'); };
   $('#obSkip').onclick=()=>{ S.onboarded=true; save(); $('#onboard').classList.add('hidden'); };
 }
 
 /* ---------- 启动(由最后载入的 view-settings.js 调用 boot) ---------- */
-/* 顶栏导航 */
-$('#nav').addEventListener('click',e=>{
-  const b=e.target.closest('button[data-view]'); if(b) go(b.dataset.view);
-});
+/* 顶栏/底部Tab导航 */
+function bindNav(el){ el.addEventListener('click',e=>{ const b=e.target.closest('button[data-view]'); if(b) go(b.dataset.view); }); }
+$$('#nav,#tabbar').forEach(bindNav);
 
 async function boot(){
   const sv=await serverLoad();                 // 数据库进度优先
-  if(sv) S=sv; else { const lc=localLoad(); if(lc) S=lc; }
+  if(sv) S=migrateState(sv); else { const lc=localLoad(); if(lc) S=migrateState(lc); }
   $('#totalBadge').textContent=`大纲词汇 ${TOTAL} 词 · Day ${Math.min(dayIndex(),PLAN_DAYS)}/${PLAN_DAYS}`;
   applyTheme();
   if(!S.onboarded) showOnboard();

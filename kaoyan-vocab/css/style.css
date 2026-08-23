@@ -154,3 +154,83 @@ tr.done-row td:first-child{color:var(--good)}
 .wd-actions{display:flex;gap:9px;flex-wrap:wrap}
 .fade-in{animation:fade .25s ease}
 @keyframes fade{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+/* ---- 组块三步法(泛看/快测/补漏) ---- */
+.phase-tag{text-align:center;color:var(--accent);font-size:13px;font-weight:600;margin:0 0 12px}
+.pv-card{background:var(--card);border:1px solid var(--line);border-radius:20px;box-shadow:var(--shadow-lg);
+  min-height:300px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
+  padding:34px 28px;text-align:center;cursor:pointer;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+.pv-word{font-size:46px;font-weight:800;letter-spacing:.5px;line-height:1.15;word-break:break-word}
+.pv-mean{font-size:20px;line-height:1.75}
+.pv-actions{display:flex;gap:12px;justify-content:center;margin-top:18px;flex-wrap:wrap}
+.quizbox{max-width:640px;margin:0 auto}
+.flashcard{-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+
+/* ---- 手机底部Tab栏(桌面隐藏) ---- */
+.tabbar{display:none}
+
+/* ---- 手机端适配(置于文件末尾确保覆盖) ---- */
+@media(max-width:760px){
+  body{font-size:14.5px;-webkit-tap-highlight-color:transparent}
+  .topbar{padding:8px 14px;gap:10px}
+  #nav{display:none}
+  .brand .logo{font-size:22px}
+  .brand-txt b{font-size:14px}
+  .brand-txt i{font-size:11px}
+  .icon-btn{width:36px;height:36px}
+  main{padding:14px 12px calc(100px + env(safe-area-inset-bottom))}
+  .foot{padding:12px 12px 4px;font-size:11.5px}
+  .card{padding:14px}
+
+  /* 底部Tab栏 */
+  .tabbar{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:60;background:var(--card);
+    border-top:1px solid var(--line);padding:5px 6px calc(5px + env(safe-area-inset-bottom));
+    justify-content:space-around;box-shadow:0 -4px 20px rgba(28,33,48,.08)}
+  .tabbar button{border:none;background:transparent;color:var(--muted);font-size:10.5px;font-family:inherit;
+    display:flex;flex-direction:column;align-items:center;gap:2px;padding:5px 6px;border-radius:10px;min-width:52px;min-height:48px}
+  .tabbar button .ti{font-size:20px;line-height:1.2}
+  .tabbar button.active{color:var(--accent);font-weight:700}
+
+  /* 触控目标加大 */
+  .btn{min-height:44px;padding:11px 16px}
+  .btn.lg{padding:14px 20px;font-size:16px}
+  .opt{padding:14px;font-size:15px;min-height:50px}
+  .letters button{min-width:34px;min-height:36px}
+  .f-speak{padding:8px 16px;font-size:13px}
+
+  /* 闪卡/泛看自适应 */
+  .flashwrap{max-width:100%}
+  .flashcard{min-height:270px;padding:24px 16px}
+  .f-word{font-size:clamp(30px,9vw,52px)}
+  .f-mean{font-size:17px}
+  .grade{gap:8px;margin-top:16px}
+  .grade .btn{flex:1;min-width:0;justify-content:center;padding:14px 6px;font-size:15px}
+  .grade .btn kbd{display:none}
+  .pv-card{min-height:250px;padding:24px 16px}
+  .pv-word{font-size:clamp(28px,8vw,44px)}
+  .pv-mean{font-size:17px}
+  .pv-actions{flex-direction:column;align-items:stretch}
+  .pv-actions .btn{width:100%;justify-content:center}
+  .quiz-q{font-size:clamp(24px,7vw,30px)}
+
+  /* 仪表盘 */
+  .hero{gap:14px}
+  .ring{width:110px;height:110px}
+  .ring .val b{font-size:20px}
+  .statcard{padding:12px}
+  .statcard b{font-size:20px}
+  .statcard span{font-size:12px}
+  table.plan{font-size:12.5px}
+  table.plan th,table.plan td{padding:7px 8px}
+
+  /* 其他 */
+  .wrow{padding:11px 12px;gap:8px}
+  .wrow .w{min-width:104px;font-size:15px}
+  .toast{bottom:calc(92px + env(safe-area-inset-bottom));left:14px;right:14px;transform:none;text-align:center;max-width:none;width:auto}
+  .kbd-hint{display:none}
+  .session-done .big{font-size:46px}
+  .study-empty .big{font-size:48px}
+  .modal{padding:20px 16px}
+  .overlay{padding:12px}
+  .summary-grid{gap:10px}
+}

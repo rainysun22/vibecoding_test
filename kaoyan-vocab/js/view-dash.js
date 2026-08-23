@@ -50,7 +50,7 @@ function renderDash(){
       <h2 style="margin:0 0 4px">${day<=PLAN_DAYS?`🔥 冲刺 Day ${day} / ${PLAN_DAYS}`:'🎓 巩固期（7天计划已完成）'}</h2>
       <p class="muted" style="margin:0 0 14px">${day<=PLAN_DAYS?`剩余 ${remain} 天 · 每日目标 ${q} 个新词 + 到期复习`:'继续复习巩固，防止遗忘'}</p>
       <div class="grid3">
-        <div class="statcard good"><b>${mastered}</b><span>已掌握(记忆稳定)</span></div>
+        <div class="statcard good"><b>${mastered}</b><span>已掌握(稳定≥7天)</span></div>
         <div class="statcard warn"><b>${due}</b><span>当前待复习</span></div>
         <div class="statcard accent"><b>${st}</b><span>连续打卡(天)</span></div>
       </div>
@@ -84,7 +84,7 @@ function renderDash(){
       ${planRows}
     </table>
     </div>
-    <p class="muted" style="font-size:12.5px;margin:10px 0 0">* 复习量按高效间隔(当天10分/1时/4时 + 跨天1/2/4天)估算，含答错重记的词会更多。进度保存在服务器数据库，可在「设置」调整每日词量。</p>
+    <p class="muted" style="font-size:12.5px;margin:10px 0 0">* 新词用组块三步法(泛看→快测→补漏)；复习由 FSRS-lite 调度：越熟的词间隔越长(目标留存率85%)，答错的词10分钟后重现。进度保存在服务器数据库。</p>
   </div>`;
 }
 window.renderDash=renderDash;
