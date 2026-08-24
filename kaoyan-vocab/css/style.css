@@ -135,6 +135,8 @@ tr.done-row td:first-child{color:var(--good)}
 .opts{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 @media(max-width:640px){.opts{grid-template-columns:1fr}}
 .opt{background:var(--card);border:2px solid var(--line);border-radius:12px;padding:13px 16px;text-align:left;font-size:15px;color:var(--text);transition:.12s}
+.opt:focus{outline:none}
+button:focus:not(:focus-visible){outline:none}
 .opt:hover{border-color:var(--accent)}
 .opt.right{border-color:var(--good);background:var(--good-soft);font-weight:700}
 .opt.wrong{border-color:var(--bad);background:var(--bad-soft)}

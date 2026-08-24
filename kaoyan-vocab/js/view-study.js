@@ -95,19 +95,24 @@ function renderPreview(){
     </div>
   </div>
   <div class="pv-actions">
+    <button class="btn ghost" onclick="pvPrev()" ${i===0?'disabled':''}>← 上一词</button>
     <button class="btn ghost" onclick="pvAllKnown()">✅ 这组我都会</button>
     <button class="btn primary lg" onclick="pvNext()">下一词 →</button>
   </div>
-  <p class="kbd-hint">点击卡片或按 <kbd>空格</kbd> 看下一词</p>`;
+  <p class="kbd-hint">点击卡片 / <kbd>空格</kbd> 下一词 · <kbd>←</kbd> 上一词</p>`;
   if(S.autoSpeak) speak(wo.w);
   keyHandlers.length=0;
-  keyHandlers.push(e=>{ if(e.code==='Space'){e.preventDefault();pvNext();} else if(e.key==='Escape') endSession(); });
+  keyHandlers.push(e=>{ if(e.code==='Space'){e.preventDefault();pvNext();} else if(e.code==='ArrowLeft'){e.preventDefault();pvPrev();} else if(e.key==='Escape') endSession(); });
 }
 function pvNext(){
   const p=ses.parts[ses.pi];
   ses.pIdx++;
   if(ses.pIdx>=p.items.length){ ses.phase='quiz'; ses.qIdx=0; ses.qOpts=null; ses.qPick=-1; }
   renderSes();
+}
+function pvPrev(){
+  if(!ses||ses.phase!=='preview'||ses.pIdx<=0) return;
+  ses.pIdx--; renderSes();
 }
 function pvAllKnown(){
   const p=ses.parts[ses.pi]; let c=0;
@@ -311,6 +316,6 @@ function starToggle(word){
   save(); toast(i>=0?'已移出生词本':'⭐ 已加入生词本');
 }
 window.renderStudy=renderStudy; window.startSession=startSession; window.renderStudyHome=renderStudyHome;
-window.pvNext=pvNext; window.pvAllKnown=pvAllKnown; window.gqAnswer=gqAnswer;
+window.pvNext=pvNext; window.pvPrev=pvPrev; window.pvAllKnown=pvAllKnown; window.gqAnswer=gqAnswer;
 window.flashFlip=flashFlip; window.flashGrade=flashGrade; window.endSession=endSession;
 window.breakContinue=breakContinue; window.doExtra=doExtra; window.starToggle=starToggle;
