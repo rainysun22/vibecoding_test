@@ -11,7 +11,7 @@
     {
       "binding": "DB",
       "database_name": "kaoyan-progress",
-      "database_id": "PLACEHOLDER_WILL_CREATE"
+      "database_id": "1fec5b85-936a-4d21-9774-2bda0f3965d3"
     }
   ],
   "observability": { "enabled": true }
