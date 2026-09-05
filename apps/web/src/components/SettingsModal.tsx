@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
-import type { ModelInfo, ProviderConfig, ProviderId, Schedule, SkillDefinition } from "@openwork/types";
+import type {
+  KnowledgeDoc,
+  KnowledgeRecall,
+  ModelInfo,
+  ProviderConfig,
+  ProviderId,
+  Schedule,
+  SkillDefinition,
+  UserProfile,
+} from "@openwork/types";
 import * as api from "../api";
 
 interface SettingsModalProps {
@@ -8,7 +17,7 @@ interface SettingsModalProps {
   onToast: (message: string) => void;
 }
 
-type Tab = "models" | "schedules" | "skills";
+type Tab = "models" | "schedules" | "skills" | "knowledge" | "profile";
 
 const PROVIDER_LABEL: Record<ProviderId, string> = {
   mock: "Mock（离线演示）",
@@ -43,11 +52,19 @@ export function SettingsModal({ skills, onClose, onToast }: SettingsModalProps) 
           <button className={tab === "skills" ? "active" : ""} onClick={() => setTab("skills")}>
             技能资产
           </button>
+          <button className={tab === "knowledge" ? "active" : ""} onClick={() => setTab("knowledge")}>
+            知识库
+          </button>
+          <button className={tab === "profile" ? "active" : ""} onClick={() => setTab("profile")}>
+            用户画像
+          </button>
         </div>
         <div className="modal-body">
           {tab === "models" && <ModelsTab onToast={onToast} />}
           {tab === "schedules" && <SchedulesTab onToast={onToast} />}
           {tab === "skills" && <SkillsTab skills={skills} />}
+          {tab === "knowledge" && <KnowledgeTab onToast={onToast} />}
+          {tab === "profile" && <ProfileTab onToast={onToast} />}
         </div>
       </div>
     </div>
@@ -364,6 +381,199 @@ function SkillsTab({ skills }: { skills: SkillDefinition[] }) {
             ))}
           </ul>
         )}
+      </section>
+    </div>
+  );
+}
+
+/* ------------------------------ 知识库（v0.4） ------------------------------ */
+
+function KnowledgeTab({ onToast }: { onToast: (message: string) => void }) {
+  const [docs, setDocs] = useState<KnowledgeDoc[]>([]);
+  const [title, setTitle] = useState("");
+  const [content, setContent] = useState("");
+  const [query, setQuery] = useState("");
+  const [recalls, setRecalls] = useState<KnowledgeRecall[] | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setDocs(await api.listKnowledgeDocs().catch(() => []));
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const add = async () => {
+    if (!content.trim() || busy) return;
+    setBusy(true);
+    try {
+      await api.addKnowledgeDoc(title.trim() || "未命名文档", content);
+      setTitle("");
+      setContent("");
+      await load();
+      onToast("文档已加入知识库 —— 委托时自动按相关性召回");
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : "添加失败");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const remove = async (id: string) => {
+    await api.deleteKnowledgeDoc(id).catch(() => null);
+    await load();
+  };
+
+  const preview = async () => {
+    if (!query.trim()) return;
+    setRecalls(await api.recallKnowledgePreview(query.trim()).catch(() => []));
+  };
+
+  return (
+    <div className="settings-sections">
+      <section>
+        <h3>个人知识库（本地优先）</h3>
+        <p className="hint">
+          上传私有文档（行业资料、产品口径、历史报告…）—— 委托时按相关性自动召回注入，内容永不出本机
+        </p>
+        <div className="knowledge-form">
+          <input
+            placeholder="文档标题，如：2026 产品口径备忘"
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+          />
+          <textarea
+            placeholder="粘贴文档内容（Markdown / 纯文本）…"
+            rows={5}
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+          />
+          <button className="btn primary" disabled={!content.trim() || busy} onClick={() => void add()}>
+            加入知识库
+          </button>
+        </div>
+      </section>
+
+      <section>
+        <h3>召回预览</h3>
+        <div className="knowledge-recall-form">
+          <input
+            placeholder="模拟委托目标，查看会命中哪些文档…"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void preview();
+            }}
+          />
+          <button className="btn ghost" onClick={() => void preview()}>
+            测试召回
+          </button>
+        </div>
+        {recalls && (
+          <ul className="knowledge-recall-list">
+            {recalls.length === 0 ? (
+              <li className="muted">无相关文档命中（低置信拒绝 —— 宁缺毋滥）</li>
+            ) : (
+              recalls.map((recall) => (
+                <li key={recall.docId}>
+                  <span className="badge info">{(recall.score * 100).toFixed(0)}%</span> {recall.title}
+                </li>
+              ))
+            )}
+          </ul>
+        )}
+      </section>
+
+      <section>
+        <h3>已有文档（{docs.length}）</h3>
+        {docs.length === 0 ? (
+          <div className="list-empty">暂无文档</div>
+        ) : (
+          <ul className="knowledge-list">
+            {docs.map((doc) => (
+              <li key={doc.id}>
+                <div>
+                  <div className="knowledge-title">{doc.title}</div>
+                  <div className="knowledge-meta">
+                    {doc.sizeChars.toLocaleString()} 字符 · {new Date(doc.createdAt).toLocaleString("zh-CN")}
+                  </div>
+                </div>
+                <button className="btn err small" onClick={() => void remove(doc.id)}>
+                  删除
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </div>
+  );
+}
+
+/* ------------------------------ 用户画像（v0.4） ------------------------------ */
+
+function ProfileTab({ onToast }: { onToast: (message: string) => void }) {
+  const [profile, setProfile] = useState<UserProfile>({});
+  const [loaded, setLoaded] = useState(false);
+
+  useEffect(() => {
+    void api
+      .getUserProfile()
+      .then(setProfile)
+      .finally(() => setLoaded(true));
+  }, []);
+
+  const save = async () => {
+    try {
+      await api.saveUserProfile(profile);
+      onToast("画像已保存 —— 此后每次委托自动生效");
+    } catch {
+      onToast("保存失败");
+    }
+  };
+
+  if (!loaded) return <div className="list-empty">加载中…</div>;
+
+  return (
+    <div className="settings-sections">
+      <section>
+        <h3>用户画像（一次填写，长期生效）</h3>
+        <p className="hint">
+          相当于给 AI 助理做「入职培训」：身份背景、工作偏好、表达风格自动注入每一次委托，不必反复自我介绍
+        </p>
+        <div className="profile-form">
+          <label>
+            <span>我是谁（身份 / 业务背景 / 所在行业）</span>
+            <textarea
+              rows={3}
+              placeholder="例：跨境电商创业者，主营家居品类，团队 5 人，关注供应链与品牌出海"
+              value={profile.about ?? ""}
+              onChange={(event) => setProfile({ ...profile, about: event.target.value })}
+            />
+          </label>
+          <label>
+            <span>工作偏好（流程 / 结构 / 重点取舍）</span>
+            <textarea
+              rows={3}
+              placeholder="例：结论先行，先给行动建议再给分析；数据必须标注出处；控制在千字内"
+              value={profile.preferences ?? ""}
+              onChange={(event) => setProfile({ ...profile, preferences: event.target.value })}
+            />
+          </label>
+          <label>
+            <span>表达风格（语气 / 受众 / 文风）</span>
+            <textarea
+              rows={3}
+              placeholder="例：正式商务语气，面向投资人；避免口语与网络用语；多用小标题与列表"
+              value={profile.voice ?? ""}
+              onChange={(event) => setProfile({ ...profile, voice: event.target.value })}
+            />
+          </label>
+          <button className="btn primary" onClick={() => void save()}>
+            保存画像
+          </button>
+        </div>
       </section>
     </div>
   );

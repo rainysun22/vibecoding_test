@@ -7,6 +7,10 @@ import { ActivityStream } from "./components/ActivityStream";
 import { DeliverablesPanel } from "./components/DeliverablesPanel";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { SettingsModal } from "./components/SettingsModal";
+import { SteeringBar } from "./components/SteeringBar";
+import { ClarificationCard } from "./components/ClarificationCard";
+import { ConfidenceBar } from "./components/ConfidenceBar";
+import { PlaybookPanel } from "./components/PlaybookPanel";
 
 /** 活动流中的实时流式输出（v0.2：LLM 增量直达前端） */
 interface LiveStream {
@@ -159,6 +163,20 @@ export function App() {
     [refreshTasks, refreshGlobal],
   );
 
+  /** 并行委托（v0.4 fork-join）：多子任务独立执行后聚合 */
+  const handleParallelCreate = useCallback(
+    async (goal: string) => {
+      const task = await api.createParallelTask(goal);
+      setSelectedId(task.id);
+      setEvents([]);
+      setTaskDeliverables([]);
+      setStreams([]);
+      void refreshTasks();
+      void refreshGlobal();
+    },
+    [refreshTasks, refreshGlobal],
+  );
+
   const handleDecide = useCallback(
     async (checkpointId: string, decision: "approve" | "reject", comment?: string) => {
       try {
@@ -188,6 +206,12 @@ export function App() {
     },
     [refreshTasks, showToast],
   );
+
+  /** 澄清答案提交后：立即刷新任务与详情（不等 SSE） */
+  const handleClarified = useCallback(() => {
+    void refreshTasks();
+    if (selectedIdRef.current) void refreshTaskDetail(selectedIdRef.current);
+  }, [refreshTasks, refreshTaskDetail]);
 
   /** 修订任务创建后选中并跟踪 */
   const handleRevisionCreated = useCallback(
@@ -238,7 +262,12 @@ export function App() {
 
       <main className="app-body">
         <section className="panel column-left">
-          <Composer skills={skills} onSubmit={handleCreate} onError={showToast} />
+          <Composer
+            skills={skills}
+            onSubmit={handleCreate}
+            onParallelSubmit={handleParallelCreate}
+            onError={showToast}
+          />
           <TaskList
             tasks={tasks}
             selectedId={selectedId}
@@ -249,12 +278,15 @@ export function App() {
         </section>
 
         <section className="panel column-center">
+          <ClarificationCard task={selectedTask} onAnswered={handleClarified} onToast={showToast} />
           <ActivityStream
             task={selectedTask}
             events={events}
             connected={connectionAlive}
             streams={streams}
           />
+          <SteeringBar task={selectedTask} onToast={showToast} />
+          <ConfidenceBar task={selectedTask} />
         </section>
 
         <section className="panel column-right">
@@ -279,6 +311,7 @@ export function App() {
             onToast={showToast}
             onTaskCreated={handleRevisionCreated}
           />
+          <PlaybookPanel refreshKey={stats?.totalTasks ?? 0} onToast={showToast} />
         </section>
       </main>
 

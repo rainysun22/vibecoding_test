@@ -2,15 +2,22 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type {
   Checkpoint,
+  ClarificationQuestion,
+  ConfidenceRecord,
   DeliverableDiff,
   DeliverableMeta,
+  KnowledgeDoc,
+  KnowledgeRecall,
+  Playbook,
   ProviderConfig,
   ProviderId,
   Schedule,
   SkillDefinition,
+  SteeringMessage,
   Task,
   TaskEvent,
   UsageSummary,
+  UserProfile,
 } from "@openwork/types";
 import { LLMGateway, type RoutingConfig } from "@openwork/llm-gateway";
 import { Storage } from "./storage.js";
@@ -20,6 +27,7 @@ import { SkillRegistry } from "./skills.js";
 import { Scheduler } from "./scheduler.js";
 import { EventBus, type RuntimeEventPayload } from "./events.js";
 import { buildDeliverableDiff } from "./diff.js";
+import { recallKnowledge } from "./knowledge.js";
 
 export interface RuntimeOptions {
   /** 数据目录（本地优先：全部状态落本机） */
@@ -28,6 +36,15 @@ export interface RuntimeOptions {
   skillsDir: string;
   /** 自动审批（演示/受信模式）。默认 false —— 语义级审批是核心信任机制 */
   autoApprove?: boolean;
+}
+
+/** 委托创建选项 */
+export interface CreateTaskOptions {
+  skillId?: string;
+  autoRun?: boolean;
+  revisionOf?: Task["revisionOf"];
+  /** v0.4 并行委托：显式分组时 fork 子任务并行执行后聚合 */
+  parallelGroups?: string[];
 }
 
 /**
@@ -68,6 +85,11 @@ export class OpenWorkRuntime {
     this.skills = new SkillRegistry(options.skillsDir, join(options.dataDir, "skills"));
     this.agent.setSkillLookup((id) => this.skills.get(id));
 
+    // fork-join 子任务派生通道：父任务计划阶段回调（隔离的子工作区）
+    this.agent.setSubtaskSpawner(async (parentId, goal, index) => {
+      await this.createSubtask(parentId, goal, index);
+    });
+
     // 用量台账：结构化落库（成本透明）
     this.bus.subscribe((payload) => {
       if (payload.usage) {
@@ -91,10 +113,7 @@ export class OpenWorkRuntime {
 
   /* ------------------------------ 委托任务 ------------------------------ */
 
-  async createTask(
-    goal: string,
-    options: { skillId?: string; autoRun?: boolean; revisionOf?: Task["revisionOf"] } = {},
-  ): Promise<Task> {
+  async createTask(goal: string, options: CreateTaskOptions = {}): Promise<Task> {
     const now = new Date().toISOString();
     const task: Task = {
       id: randomUUID(),
@@ -102,6 +121,7 @@ export class OpenWorkRuntime {
       status: "pending",
       skillId: options.skillId,
       revisionOf: options.revisionOf,
+      parallelGroups: options.parallelGroups,
       createdAt: now,
       updatedAt: now,
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, costUSD: 0 },
@@ -110,7 +130,9 @@ export class OpenWorkRuntime {
     this.bus.emit("task.created", {
       type: "task.created",
       taskId: task.id,
-      title: `新委托：${goal.slice(0, 60)}`,
+      title: options.parallelGroups?.length
+        ? `新委托（并行 ×${options.parallelGroups.length}）：${goal.slice(0, 60)}`
+        : `新委托：${goal.slice(0, 60)}`,
       at: now,
     });
 
@@ -120,6 +142,42 @@ export class OpenWorkRuntime {
       });
     }
     return task;
+  }
+
+  /**
+   * 并行委托：目标含多个独立子对象时 fork 多个子任务（v0.4）。
+   * 未显式分组时按分隔词自动切分（、/，/，以及/和/与/vs）。
+   */
+  async createParallelTask(goal: string, groups?: string[]): Promise<Task> {
+    const parts = groups ?? splitParallelGoal(goal);
+    if (parts.length < 2) {
+      return this.createTask(goal); // 不可切分：退化为普通委托
+    }
+    return this.createTask(goal, { parallelGroups: parts });
+  }
+
+  /** 子任务派生（fork-join）：独立运行，完成后回调父任务聚合 */
+  private async createSubtask(parentId: string, goal: string, index: number): Promise<void> {
+    const now = new Date().toISOString();
+    const task: Task = {
+      id: randomUUID(),
+      goal: `并行子委托 ${index}：${goal}`,
+      status: "pending",
+      parentTaskId: parentId,
+      batchIndex: index,
+      createdAt: now,
+      updatedAt: now,
+      usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, costUSD: 0 },
+    };
+    this.storage.createTask(task);
+    void this.agent.run(task.id).catch(() => {
+      // 错误已在 agent 内落库并广播；子任务失败不阻断兄弟任务
+    });
+  }
+
+  /** 父任务的子任务清单（工作区隔离视图） */
+  listSubtasks(parentId: string): Task[] {
+    return this.storage.listSubtasks(parentId);
   }
 
   getTask(id: string): Task | null {
@@ -133,8 +191,8 @@ export class OpenWorkRuntime {
   async resumeTask(id: string): Promise<Task | null> {
     const task = this.storage.getTask(id);
     if (!task) return null;
-    if (["completed", "failed", "cancelled", "awaiting_approval"].includes(task.status)) {
-      return task; // 终态或审批暂停：无需恢复
+    if (["completed", "failed", "cancelled", "awaiting_approval", "awaiting_clarification"].includes(task.status)) {
+      return task; // 终态或等待用户输入（审批/澄清）：无需恢复
     }
 
     // 续跑事件同时落库（轨迹可回放）并广播（前端实时刷新）
@@ -160,11 +218,11 @@ export class OpenWorkRuntime {
     return task;
   }
 
-  /** 启动时恢复所有中断任务（v0.3：断点恢复） */
+  /** 启动时恢复所有中断任务（v0.3：断点恢复；等待用户输入的不在此列） */
   private resumeInterrupted(): void {
     const interrupted = this.storage
       .listTasks(10_000)
-      .filter((t) => !["completed", "failed", "cancelled", "awaiting_approval"].includes(t.status));
+      .filter((t) => !["completed", "failed", "cancelled", "awaiting_approval", "awaiting_clarification"].includes(t.status));
     for (const task of interrupted) {
       void this.resumeTask(task.id);
     }
@@ -176,6 +234,122 @@ export class OpenWorkRuntime {
 
   listEvents(taskId: string, afterSeq?: number): TaskEvent[] {
     return this.storage.listEvents(taskId, afterSeq);
+  }
+
+  /* ------------------------------ 知识库（v0.4） ------------------------------ */
+
+  /** 新增知识文档（本地优先：内容永不出本机） */
+  addKnowledgeDoc(title: string, content: string): KnowledgeDoc {
+    const now = new Date().toISOString();
+    const doc: KnowledgeDoc & { content: string } = {
+      id: randomUUID(),
+      title: title.trim() || "未命名文档",
+      content,
+      sizeChars: content.length,
+      createdAt: now,
+    };
+    this.storage.addKnowledgeDoc(doc);
+    return doc;
+  }
+
+  listKnowledgeDocs(): KnowledgeDoc[] {
+    return this.storage.listKnowledgeDocs();
+  }
+
+  deleteKnowledgeDoc(id: string): boolean {
+    return this.storage.deleteKnowledgeDoc(id);
+  }
+
+  /** 知识召回测试入口（调试 / UI 预览用） */
+  recallKnowledgePreview(query: string): KnowledgeRecall[] {
+    return recallKnowledge(this.storage.allKnowledgeContent(), query);
+  }
+
+  /* ------------------------------ 用户画像（v0.4） ------------------------------ */
+
+  getUserProfile(): UserProfile {
+    return this.storage.getUserProfile();
+  }
+
+  saveUserProfile(profile: UserProfile): UserProfile {
+    this.storage.saveUserProfile(profile);
+    return this.getUserProfile();
+  }
+
+  /* ------------------------------ 中途转向（v0.4） ------------------------------ */
+
+  /** 运行中的任务排队一条用户指令（步骤间隙注入） */
+  steerTask(taskId: string, content: string): SteeringMessage {
+    const task = this.storage.getTask(taskId);
+    if (!task) throw new Error("任务不存在");
+    if (["completed", "failed", "cancelled"].includes(task.status)) {
+      throw new Error("任务已结束，无法转向（请使用修订功能）");
+    }
+
+    const message: SteeringMessage = {
+      id: randomUUID(),
+      taskId,
+      content: content.trim(),
+      status: "queued",
+      createdAt: new Date().toISOString(),
+    };
+    this.storage.addSteeringMessage(message);
+    this.bus.emit("steering.queued", {
+      type: "steering.queued",
+      taskId,
+      title: `中途指令已排队：${message.content.slice(0, 60)}`,
+      at: message.createdAt,
+    });
+    return message;
+  }
+
+  listSteeringMessages(taskId: string): SteeringMessage[] {
+    return this.storage.listSteeringMessages(taskId);
+  }
+
+  /* ------------------------------ 主动澄清（v0.5） ------------------------------ */
+
+  /** 任务挂起的澄清问题（前端渲染澄清卡） */
+  listClarifications(taskId: string): ClarificationQuestion[] {
+    return this.storage.listClarificationQuestions(taskId);
+  }
+
+  /** 提交澄清答案（或跳过）：注入规划上下文并续跑任务 */
+  async submitClarifications(
+    taskId: string,
+    answers: string[],
+    skipped = false,
+  ): Promise<Task | null> {
+    await this.agent.submitClarifications(taskId, answers, skipped);
+    return this.storage.getTask(taskId);
+  }
+
+  /* ------------------------------ 置信度传播（v0.5） ------------------------------ */
+
+  /** 任务置信度轨迹（前端置信度条与审计） */
+  getTaskConfidence(taskId: string): { taskConfidence: number; steps: ConfidenceRecord[] } | null {
+    const task = this.storage.getTask(taskId);
+    if (!task) return null;
+    const state = (task.runState ?? {}) as {
+      taskConfidence?: number;
+      confidences?: ConfidenceRecord[];
+    };
+    return {
+      taskConfidence: state.taskConfidence ?? 1,
+      steps: state.confidences ?? [],
+    };
+  }
+
+  /* ------------------------------ 经验回放（v0.5） ------------------------------ */
+
+  /** 已固化的成功经验库（前端 playbook 视图） */
+  listPlaybooks(): Playbook[] {
+    return this.storage.listPlaybooks();
+  }
+
+  /** 删除经验（用户治理低效 playbook） */
+  deletePlaybook(id: string): boolean {
+    return this.storage.deletePlaybook(id);
   }
 
   /* ------------------------------ 审批 ------------------------------ */
@@ -397,4 +571,15 @@ export class OpenWorkRuntime {
     this.scheduler.stopAll();
     this.storage.close();
   }
+}
+
+/* ------------------------------ 辅助函数 ------------------------------ */
+
+/** 目标切分：按分隔词拆出并行子目标（2-5 组才值得 fork；否则退化为单任务） */
+function splitParallelGoal(goal: string): string[] {
+  const parts = goal
+    .split(/[、，,]|以及|和|与(?=[^（(]*[、，,，]|$)|\bversus\b|\bvs\.?\b/gi)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 2);
+  return parts.length >= 2 && parts.length <= 5 ? parts : [goal];
 }

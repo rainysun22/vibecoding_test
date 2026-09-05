@@ -1,16 +1,23 @@
 import type {
   Checkpoint,
+  ClarificationQuestion,
+  ConfidenceRecord,
   DeliverableDiff,
   DeliverableMeta,
   DeliverableVersion,
+  KnowledgeDoc,
+  KnowledgeRecall,
+  Playbook,
   ProviderConfig,
   ProviderId,
   ModelInfo,
   Schedule,
   SkillDefinition,
+  SteeringMessage,
   Task,
   TaskEvent,
   UsageSummary,
+  UserProfile,
 } from "@openwork/types";
 
 /**
@@ -41,6 +48,14 @@ export function createTask(goal: string, skillId?: string): Promise<Task> {
   });
 }
 
+/** 并行委托：fork 子任务独立执行后聚合（v0.4） */
+export function createParallelTask(goal: string, groups?: string[]): Promise<Task> {
+  return request("/api/tasks", {
+    method: "POST",
+    body: JSON.stringify({ goal, parallel: true, groups }),
+  });
+}
+
 export function listTasks(limit = 50): Promise<Task[]> {
   return request(`/api/tasks?limit=${limit}`);
 }
@@ -57,6 +72,65 @@ export function getTask(id: string): Promise<TaskDetail> {
 /** 断点续跑：恢复中断的任务 */
 export function resumeTask(id: string): Promise<Task> {
   return request(`/api/tasks/${id}/resume`, { method: "POST" });
+}
+
+/** 中途转向：运行中任务排队用户指令（v0.4） */
+export function steerTask(id: string, content: string): Promise<SteeringMessage> {
+  return request(`/api/tasks/${id}/steer`, {
+    method: "POST",
+    body: JSON.stringify({ content }),
+  });
+}
+
+export function listSteeringMessages(id: string): Promise<SteeringMessage[]> {
+  return request(`/api/tasks/${id}/steering`);
+}
+
+/** 并行委托的子任务清单（v0.4） */
+export function listSubtasks(id: string): Promise<Task[]> {
+  return request(`/api/tasks/${id}/subtasks`);
+}
+
+/* ------------------------------ 主动澄清（v0.5） ------------------------------ */
+
+/** 任务挂起的澄清问题（澄清卡渲染） */
+export function listClarifications(id: string): Promise<ClarificationQuestion[]> {
+  return request(`/api/tasks/${id}/clarifications`);
+}
+
+/** 提交澄清答案（按问题顺序）或跳过（按现有信息继续） */
+export function submitClarifications(
+  id: string,
+  answers: string[],
+  skip = false,
+): Promise<Task> {
+  return request(`/api/tasks/${id}/clarifications`, {
+    method: "POST",
+    body: JSON.stringify(skip ? { skip: true } : { answers }),
+  });
+}
+
+/* ------------------------------ 置信度传播（v0.5） ------------------------------ */
+
+export interface TaskConfidence {
+  taskConfidence: number | null;
+  steps: ConfidenceRecord[];
+}
+
+/** 任务/步骤置信度轨迹（置信度条渲染） */
+export function getTaskConfidence(id: string): Promise<TaskConfidence> {
+  return request(`/api/tasks/${id}/confidence`);
+}
+
+/* ------------------------------ 经验回放（v0.5） ------------------------------ */
+
+/** 已固化的成功经验库（playbook 视图） */
+export function listPlaybooks(): Promise<Playbook[]> {
+  return request("/api/playbooks");
+}
+
+export function deletePlaybook(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/playbooks/${id}`, { method: "DELETE" });
 }
 
 /* ------------------------------ 审批 ------------------------------ */
@@ -115,6 +189,41 @@ export function reviseDeliverable(id: string, feedback: string): Promise<Task> {
   return request(`/api/deliverables/${id}/revise`, {
     method: "POST",
     body: JSON.stringify({ feedback }),
+  });
+}
+
+/* ------------------------------ 知识库（v0.4） ------------------------------ */
+
+export function listKnowledgeDocs(): Promise<KnowledgeDoc[]> {
+  return request("/api/knowledge");
+}
+
+export function addKnowledgeDoc(title: string, content: string): Promise<KnowledgeDoc> {
+  return request("/api/knowledge", {
+    method: "POST",
+    body: JSON.stringify({ title, content }),
+  });
+}
+
+export function deleteKnowledgeDoc(id: string): Promise<{ ok: boolean }> {
+  return request(`/api/knowledge/${id}`, { method: "DELETE" });
+}
+
+/** 知识召回预览：查询会命中哪些私有文档 */
+export function recallKnowledgePreview(query: string): Promise<KnowledgeRecall[]> {
+  return request(`/api/knowledge/recall?q=${encodeURIComponent(query)}`);
+}
+
+/* ------------------------------ 用户画像（v0.4） ------------------------------ */
+
+export function getUserProfile(): Promise<UserProfile> {
+  return request("/api/profile");
+}
+
+export function saveUserProfile(profile: UserProfile): Promise<UserProfile> {
+  return request("/api/profile", {
+    method: "PUT",
+    body: JSON.stringify(profile),
   });
 }
 

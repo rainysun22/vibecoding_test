@@ -178,6 +178,14 @@ body {
   padding: 10px 16px 14px;
 }
 
+/* v0.4：并行开关提示 */
+.composer-parallel-hint {
+  padding: 0 16px;
+  font-size: 11px;
+  color: var(--info);
+  line-height: 1.5;
+}
+
 .chip {
   background: var(--bg-raised);
   border: 1px solid var(--border);
@@ -1162,4 +1170,443 @@ body {
   width: 15px;
   height: 15px;
   cursor: pointer;
+}
+
+/* ------------------------------ v0.4：中途转向 ------------------------------ */
+
+.steering-bar {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+}
+
+.steering-input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.steering-input-row input {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.steering-input-row input:focus {
+  border-color: var(--accent);
+}
+
+.steering-list {
+  list-style: none;
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.steering-item {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 12px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: var(--bg-raised);
+}
+
+.steering-item.injected {
+  opacity: 0.65;
+}
+
+.steering-item.dismissed {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+.steering-status {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.steering-item.injected .steering-status {
+  color: var(--ok);
+}
+
+.steering-content {
+  color: var(--text);
+}
+
+.steering-idle {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+/* ------------------------------ v0.4：知识库 / 画像 ------------------------------ */
+
+.knowledge-form,
+.profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.knowledge-form textarea,
+.profile-form textarea {
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 12px;
+  resize: vertical;
+  outline: none;
+}
+
+.knowledge-form textarea:focus,
+.profile-form textarea:focus {
+  border-color: var(--accent);
+}
+
+.profile-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.profile-form label span {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.knowledge-recall-form {
+  display: flex;
+  gap: 8px;
+}
+
+.knowledge-recall-form input {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.knowledge-recall-list,
+.knowledge-list {
+  list-style: none;
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.knowledge-recall-list li {
+  font-size: 12px;
+  padding: 6px 8px;
+  background: var(--bg-raised);
+  border-radius: 6px;
+}
+
+.knowledge-recall-list li.muted {
+  color: var(--text-muted);
+}
+
+.knowledge-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+  border-radius: 6px;
+}
+
+.knowledge-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.knowledge-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
+
+.composer-controls .parallel-on {
+  box-shadow: 0 0 0 1px var(--accent-bright);
+}
+
+/* ------------------------------ v0.5：主动澄清 ------------------------------ */
+
+.clarify-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.clarify-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.clarify-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-bright);
+  border: 1px solid var(--accent-bright);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.clarify-title {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.clarify-question {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.clarify-q {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.clarify-rationale {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.clarify-question input {
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.clarify-question input:focus {
+  border-color: var(--accent);
+}
+
+.clarify-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ------------------------------ v0.5：置信度条 ------------------------------ */
+
+.confidence-bar {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.confidence-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.confidence-label {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.confidence-meter {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.confidence-meter.small {
+  height: 4px;
+  flex: 0 0 90px;
+}
+
+.confidence-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s ease;
+}
+
+.confidence-fill.high {
+  background: var(--ok);
+}
+
+.confidence-fill.mid {
+  background: var(--warn);
+}
+
+.confidence-fill.low {
+  background: var(--err);
+}
+
+.confidence-value {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-family: var(--mono);
+  min-width: 68px;
+  text-align: right;
+}
+
+.confidence-value.high {
+  color: var(--ok);
+}
+
+.confidence-value.mid {
+  color: var(--warn);
+}
+
+.confidence-value.low {
+  color: var(--err);
+}
+
+.confidence-steps {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.confidence-step {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 11px;
+}
+
+.confidence-step-title {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-muted);
+}
+
+/* ------------------------------ v0.5：经验回放 ------------------------------ */
+
+.playbook-panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.playbook-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.playbook-badge {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--info);
+  border: 1px solid var(--info);
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.playbook-count {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.playbook-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.playbook-item {
+  border-radius: 6px;
+  background: var(--bg-raised);
+  overflow: hidden;
+}
+
+.playbook-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+}
+
+.playbook-summary:hover {
+  background: var(--bg-panel);
+}
+
+.playbook-pattern {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.playbook-meta {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: var(--mono);
+}
+
+.playbook-detail {
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.playbook-outcome {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.playbook-steps {
+  margin-left: 18px;
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }

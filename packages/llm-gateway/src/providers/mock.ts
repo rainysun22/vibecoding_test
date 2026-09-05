@@ -79,17 +79,58 @@ export class MockProvider implements LLMProvider {
   /** 依据 system 指令中的任务标记生成对应结构化输出 */
   private synthesize(request: CompletionRequest): string {
     const lastUser = [...request.messages].reverse().find((m) => m.role === "user");
-    const goal = extractGoal(lastUser?.content ?? "");
+    const userText = lastUser?.content ?? "";
+    const goal = extractGoal(userText);
     const systemText = request.messages
       .filter((m) => m.role === "system")
       .map((m) => m.content)
       .join("\n");
 
     if (systemText.includes("PLANNER")) return mockPlan(goal);
-    if (systemText.includes("VERIFIER")) return mockVerdict(goal);
+    if (systemText.includes("VERIFIER")) return mockVerdict(goal, userText);
+    if (systemText.includes("REFINER")) return mockRefine(userText, goal);
+    if (systemText.includes("SYNTHESIZER")) return mockSynthesis(userText, goal);
     if (systemText.includes("TITLE_MAKER")) return `「${goal}」深度成果报告`;
-    return mockBody(goal, systemText);
+    if (systemText.includes("RESEARCHER")) return mockResearch(goal, userText);
+    return mockBody(goal, systemText, userText);
   }
+}
+
+/** 聚合输出：回显子任务清单（集成测试可断言 fork-join 链路） */
+function mockSynthesis(userText: string, goal: string): string {
+  const groups = [...userText.matchAll(/【子任务 (\d+)：(.+?)】/g)].map(
+    (m) => `${m[1]}. ${m[2]}`,
+  );
+  if (groups.length === 0) {
+    return `# 「${goal}」聚合报告\n\n（无子任务成果可聚合）`;
+  }
+  return [
+    `# 「${goal}」聚合报告`,
+    "",
+    ...groups.map((g) => `## ${g}\n\n（本节由对应子任务成果聚合而成，去除重复并统一口径）`),
+    "",
+    "以上内容经 SYNTHESIZER 聚合：独立调研 → 统一正文。",
+  ].join("\n");
+}
+
+/** 研究输出：命中知识库时回显（集成测试可断言召回注入链路） */
+function mockResearch(goal: string, userText: string): string {
+  const hits = [...userText.matchAll(/【个人知识库：(.+?)（相关度 \d+%）】/g)].map((m) => m[1]);
+  const header = hits.length > 0 ? `- 知识库命中：${hits.join("、")}` : "";
+  const base = [
+    `# 研究笔记：${goal}`,
+    "",
+    "## 背景与现状",
+    "- 该领域正处于快速演进期，核心驱动因素包括技术成熟度提升与用户预期变化。",
+    "- 头部玩家已形成差异化格局，但开放中立方案仍属稀缺。",
+    "",
+    "## 关键要点",
+    "1. **结构趋势**：从问答式交互转向任务式交付，成果物成为核心价值锚点。",
+    "2. **成本结构**：多模型路由与本地模型可显著降低边际成本。",
+    "3. **信任机制**：语义级审批优于逐 token 审批，兼顾效率与可控。",
+  ];
+  if (header) base.splice(2, 0, header);
+  return base.join("\n");
 }
 
 /* ----------------------------- 确定性合成 ----------------------------- */
@@ -160,35 +201,26 @@ function mockPlan(goal: string): string {
   );
 }
 
-function mockBody(goal: string, systemText: string): string {
-  const isResearch = systemText.includes("RESEARCHER");
-  if (isResearch) {
-    return [
-      `# 研究笔记：${goal}`,
-      "",
-      "## 背景与现状",
-      "- 该领域正处于快速演进期，核心驱动因素包括技术成熟度提升与用户预期变化。",
-      "- 头部玩家已形成差异化格局，但开放中立方案仍属稀缺。",
-      "",
-      "## 关键要点",
-      "1. **结构趋势**：从问答式交互转向任务式交付，成果物成为核心价值锚点。",
-      "2. **成本结构**：多模型路由与本地模型可显著降低边际成本。",
-      "3. **信任机制**：语义级审批优于逐 token 审批，兼顾效率与可控。",
-      "",
-      "## 可引用数据（示意）",
-      "| 指标 | 数值 | 说明 |",
-      "| --- | --- | --- |",
-      "| 采纳率 | 62% | 目标用户群中表示愿意迁移 |",
-      "| 成本下降 | 40% | 多模型路由 vs 单一旗舰模型 |",
-      "| 交付时长 | 3.5 分钟 | 端到端一句话到成果 |",
-    ].join("\n");
-  }
+function mockBody(goal: string, systemText: string, userText?: string): string {
+  // 正文回显中途转向指令（集成测试可断言 steering 注入链路）
+  const steering = [...(userText ?? "").matchAll(/用户中途补充指令[^\n]*\n([\s\S]*?)(?=\n\n|$)/g)]
+    .flatMap((m) => m[1]!.split("\n"))
+    .map((line) => line.replace(/^\d+\.\s*/, "").trim())
+    .filter(Boolean);
+  const steeringNote =
+    steering.length > 0 ? `> 已落实用户中途指令：${steering.join("；")}` : "";
+
+  // 正文回显澄清答案（集成测试可断言 clarification 注入链路）
+  const clarified = [...(userText ?? "").matchAll(/问：(.+?)\n答：(.+)/g)].map((m) => m[2]!.trim());
+  const clarifyNote = clarified.length > 0 ? `> 已落实澄清要求：${clarified.join("；")}` : "";
 
   const title = `「${goal}」深度成果报告`;
   return [
     `# ${title}`,
     "",
     "> 由 OpenWork Agent 离线演示引擎生成 —— 配置任一真实模型提供商后，本文将由所选模型实时撰写。",
+    ...(steeringNote ? ["", steeringNote] : []),
+    ...(clarifyNote ? ["", clarifyNote] : []),
     "",
     "## 一、引言",
     "",
@@ -223,7 +255,27 @@ function mockBody(goal: string, systemText: string): string {
   ].join("\n");
 }
 
-function mockVerdict(goal: string): string {
+function mockVerdict(goal: string, userText: string): string {
+  // 精炼闭环的确定性触发：目标含「精炼/revise」标记 → 初检 revise；
+  // 重写后的正文带【已精炼】标记 → 复检 pass（测试可断言批判-精炼循环）
+  const refined = userText.includes("【已精炼】");
+  const wantsRefine = /精炼|需改进|revise/i.test(goal);
+  if (wantsRefine && !refined) {
+    return JSON.stringify(
+      {
+        verdict: "revise",
+        score: 61,
+        strengths: ["结构基本完整"],
+        issues: [
+          "引言未点明委托背景，需补充目标语境",
+          "核心论据缺少数据支撑，需补齐关键数字",
+          "结论过于笼统，需给出可执行建议",
+        ],
+      },
+      null,
+      2,
+    );
+  }
   return JSON.stringify(
     {
       verdict: "pass",
@@ -238,6 +290,29 @@ function mockVerdict(goal: string): string {
     null,
     2,
   );
+}
+
+/** 精炼输出：回显批评条目（集成测试可断言批评注入链路），带复检识别标记 */
+function mockRefine(userText: string, goal: string): string {
+  const critiqueBlock = userText.split("校验批评")[1] ?? "";
+  const issues = [...critiqueBlock.matchAll(/^\d+\.\s*(.+)$/gm)].map((m) => m[1]!.trim());
+  const applied =
+    issues.length > 0
+      ? issues.map((issue, i) => `${i + 1}. 已落实：${issue}`).join("\n")
+      : "（无批评条目）";
+  return [
+    `# 「${goal}」深度成果报告（精炼版）`,
+    "",
+    "> 【已精炼】本轮正文依据校验批评逐条改写。",
+    "",
+    "## 批评落实清单",
+    "",
+    applied,
+    "",
+    "## 精炼后正文",
+    "",
+    "围绕委托目标的结构完整分析，论据补齐数据支撑，结论给出可执行建议。",
+  ].join("\n");
 }
 
 /* ----------------------------- 工具函数 ----------------------------- */

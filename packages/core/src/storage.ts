@@ -1,14 +1,20 @@
 import { DatabaseSync } from "node:sqlite";
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import type {
   Checkpoint,
+  ClarificationQuestion,
   DeliverableMeta,
   DeliverableVersion,
+  KnowledgeDoc,
+  Playbook,
   Schedule,
+  SteeringMessage,
   Task,
   TaskEvent,
+  UserProfile,
 } from "@openwork/types";
+import { bigrams, overlapScore } from "./knowledge.js";
 
 /**
  * 本地优先持久化 —— node:sqlite（零原生依赖，数据永不出本机）。
@@ -140,6 +146,39 @@ export class Storage {
         size_chars INTEGER NOT NULL,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS steering_messages (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        created_at TEXT NOT NULL,
+        injected_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_steering_task ON steering_messages(task_id, status);
+
+      CREATE TABLE IF NOT EXISTS clarification_questions (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        question TEXT NOT NULL,
+        rationale TEXT,
+        answer TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TEXT NOT NULL,
+        answered_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_clarification_task ON clarification_questions(task_id, status);
+
+      CREATE TABLE IF NOT EXISTS playbooks (
+        id TEXT PRIMARY KEY,
+        goal_pattern TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        steps TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        use_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
     this.addColumnIfMissing("tasks", "revision_of", "TEXT");
     this.addColumnIfMissing("tasks", "parent_task_id", "TEXT");
@@ -231,8 +270,8 @@ export class Storage {
   createTask(task: Task): void {
     this.db
       .prepare(
-        `INSERT INTO tasks (id, goal, status, skill_id, revision_of, created_at, updated_at, prompt_tokens, completion_tokens, total_tokens, cost_usd)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, goal, status, skill_id, revision_of, parent_task_id, batch_index, parallel_groups, created_at, updated_at, prompt_tokens, completion_tokens, total_tokens, cost_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         task.id,
@@ -240,6 +279,9 @@ export class Storage {
         task.status,
         task.skillId ?? null,
         task.revisionOf ? JSON.stringify(task.revisionOf) : null,
+        task.parentTaskId ?? null,
+        task.batchIndex ?? null,
+        task.parallelGroups ? JSON.stringify(task.parallelGroups) : null,
         task.createdAt,
         task.updatedAt,
         task.usage.promptTokens,
@@ -247,6 +289,13 @@ export class Storage {
         task.usage.totalTokens,
         task.usage.costUSD,
       );
+  }
+
+  listSubtasks(parentId: string): Task[] {
+    return this.all<TaskRow>(
+      "SELECT * FROM tasks WHERE parent_task_id = ? ORDER BY batch_index",
+      parentId,
+    ).map(toTask);
   }
 
   updateTask(
@@ -447,6 +496,206 @@ export class Storage {
     ).map(toVersion);
   }
 
+  /* ------------------------------ Knowledge Base ------------------------------ */
+
+  addKnowledgeDoc(doc: KnowledgeDoc & { content: string }): void {
+    this.db
+      .prepare(
+        "INSERT INTO knowledge_docs (id, title, content, size_chars, created_at) VALUES (?, ?, ?, ?, ?)",
+      )
+      .run(doc.id, doc.title, doc.content, doc.sizeChars, doc.createdAt);
+  }
+
+  listKnowledgeDocs(): KnowledgeDoc[] {
+    return this.all<KnowledgeDocRow>(
+      "SELECT id, title, size_chars, created_at FROM knowledge_docs ORDER BY created_at DESC",
+    ).map((row) => ({
+      id: row.id,
+      title: row.title,
+      sizeChars: row.size_chars,
+      createdAt: row.created_at,
+    }));
+  }
+
+  /** 全量内容读取（召回引擎遍历用；本地库规模下无压力） */
+  allKnowledgeContent(): (KnowledgeDoc & { content: string })[] {
+    return this.all<KnowledgeDocRow & { content: string }>(
+      "SELECT * FROM knowledge_docs",
+    ).map((row) => ({
+      id: row.id,
+      title: row.title,
+      content: row.content,
+      sizeChars: row.size_chars,
+      createdAt: row.created_at,
+    }));
+  }
+
+  deleteKnowledgeDoc(id: string): boolean {
+    return Number(this.db.prepare("DELETE FROM knowledge_docs WHERE id = ?").run(id).changes) > 0;
+  }
+
+  /* ------------------------------ User Profile ------------------------------ */
+
+  getUserProfile(): UserProfile {
+    const raw = this.getSetting("userProfile");
+    if (!raw) return {};
+    try {
+      return JSON.parse(raw) as UserProfile;
+    } catch {
+      return {};
+    }
+  }
+
+  saveUserProfile(profile: UserProfile): void {
+    this.setSetting("userProfile", JSON.stringify({ ...profile, updatedAt: new Date().toISOString() }));
+  }
+
+  /* ------------------------------ Steering ------------------------------ */
+
+  addSteeringMessage(message: SteeringMessage): void {
+    this.db
+      .prepare(
+        "INSERT INTO steering_messages (id, task_id, content, status, created_at, injected_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(message.id, message.taskId, message.content, message.status, message.createdAt, message.injectedAt ?? null);
+  }
+
+  listQueuedSteering(taskId: string): SteeringMessage[] {
+    return this.all<SteeringRow>(
+      "SELECT * FROM steering_messages WHERE task_id = ? AND status = 'queued' ORDER BY created_at",
+      taskId,
+    ).map(toSteering);
+  }
+
+  listSteeringMessages(taskId: string): SteeringMessage[] {
+    return this.all<SteeringRow>(
+      "SELECT * FROM steering_messages WHERE task_id = ? ORDER BY created_at",
+      taskId,
+    ).map(toSteering);
+  }
+
+  /** 标记转向消息已注入后续步骤 */
+  markSteeringInjected(id: string): void {
+    this.db
+      .prepare("UPDATE steering_messages SET status = 'injected', injected_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), id);
+  }
+
+  /** 任务终态后清空未消费的排队消息 */
+  dismissSteering(taskId: string): void {
+    this.db
+      .prepare("UPDATE steering_messages SET status = 'dismissed' WHERE task_id = ? AND status = 'queued'")
+      .run(taskId);
+  }
+
+  /* ------------------------------ Clarifications (v0.5) ------------------------------ */
+
+  addClarificationQuestion(question: ClarificationQuestion): void {
+    this.db
+      .prepare(
+        `INSERT INTO clarification_questions (id, task_id, question, rationale, answer, status, created_at, answered_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        question.id,
+        question.taskId,
+        question.question,
+        question.rationale ?? null,
+        question.answer ?? null,
+        question.status,
+        question.createdAt,
+        question.answeredAt ?? null,
+      );
+  }
+
+  listClarificationQuestions(taskId: string): ClarificationQuestion[] {
+    return this.all<ClarificationRow>(
+      "SELECT * FROM clarification_questions WHERE task_id = ? ORDER BY created_at",
+      taskId,
+    ).map(toClarification);
+  }
+
+  /** 提交答案（或跳过）：一次性落全部问题 */
+  answerClarifications(taskId: string, answers: string[], skipped = false): void {
+    const questions = this.listClarificationQuestions(taskId).filter((q) => q.status === "pending");
+    const now = new Date().toISOString();
+    for (const [index, question] of questions.entries()) {
+      const answer = skipped ? null : (answers[index] ?? "").trim() || null;
+      this.db
+        .prepare(
+          `UPDATE clarification_questions SET answer = ?, status = ?, answered_at = ? WHERE id = ?`,
+        )
+        .run(answer, skipped ? "skipped" : "answered", now, question.id);
+    }
+  }
+
+  /* ------------------------------ Playbooks (v0.5) ------------------------------ */
+
+  savePlaybook(playbook: Playbook): void {
+    // UPSERT：同一经验的再次成功 → 刷新路径与要点（useCount 由调用方保留）
+    this.db
+      .prepare(
+        `INSERT INTO playbooks (id, goal_pattern, summary, steps, outcome, use_count, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           goal_pattern = excluded.goal_pattern,
+           summary = excluded.summary,
+           steps = excluded.steps,
+           outcome = excluded.outcome,
+           use_count = excluded.use_count,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        playbook.id,
+        playbook.goalPattern,
+        playbook.summary,
+        JSON.stringify(playbook.steps),
+        playbook.outcome,
+        playbook.useCount,
+        playbook.createdAt,
+        playbook.updatedAt,
+      );
+  }
+
+  listPlaybooks(): Playbook[] {
+    return this.all<PlaybookRow>("SELECT * FROM playbooks ORDER BY updated_at DESC").map(toPlaybook);
+  }
+
+  /** 目标相似的 playbook（bigram 重叠召回；调用方注入规划器） */
+  findSimilarPlaybooks(goal: string, limit = 2): Playbook[] {
+    const queryGrams = bigrams(goal);
+    if (queryGrams.size === 0) return [];
+    return this.listPlaybooks()
+      .map((playbook) => ({
+        playbook,
+        score: overlapScore(queryGrams, bigrams(playbook.goalPattern)),
+      }))
+      .filter((entry) => entry.score >= 0.15)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map((entry) => entry.playbook);
+  }
+
+  /** 召回计数（使用越多越可信；也是低效经验修剪的依据） */
+  bumpPlaybookUse(id: string): void {
+    this.db
+      .prepare("UPDATE playbooks SET use_count = use_count + 1, updated_at = ? WHERE id = ?")
+      .run(new Date().toISOString(), id);
+  }
+
+  deletePlaybook(id: string): boolean {
+    return Number(this.db.prepare("DELETE FROM playbooks WHERE id = ?").run(id).changes) > 0;
+  }
+
+  /** 修剪：超过上限时淘汰召回次数最少的（技能库治理：低效经验出局） */
+  prunePlaybooks(max = 50): number {
+    const all = this.listPlaybooks();
+    if (all.length <= max) return 0;
+    const victims = [...all].sort((a, b) => a.useCount - b.useCount).slice(0, all.length - max);
+    for (const victim of victims) this.deletePlaybook(victim.id);
+    return victims.length;
+  }
+
   /* ------------------------------ Schedules ------------------------------ */
 
   createSchedule(schedule: Schedule): void {
@@ -511,6 +760,7 @@ export class Storage {
 
 interface TaskRow {
   id: string; goal: string; status: string; skill_id: string | null; revision_of: string | null;
+  parent_task_id: string | null; batch_index: number | null; parallel_groups: string | null;
   created_at: string; updated_at: string; completed_at: string | null; error: string | null;
   run_state: string | null; prompt_tokens: number; completion_tokens: number;
   total_tokens: number; cost_usd: number;
@@ -525,12 +775,24 @@ function toTask(row: TaskRow): Task & { runState: unknown } {
       // 损坏的修订信息按无修订处理
     }
   }
+  let parallelGroups: string[] | undefined;
+  if (row.parallel_groups) {
+    try {
+      const parsed = JSON.parse(row.parallel_groups) as unknown;
+      if (Array.isArray(parsed)) parallelGroups = parsed.filter((g): g is string => typeof g === "string");
+    } catch {
+      // 损坏的并行分组按无分组处理
+    }
+  }
   return {
     id: row.id,
     goal: row.goal,
     status: row.status as Task["status"],
     skillId: row.skill_id ?? undefined,
     revisionOf,
+    parentTaskId: row.parent_task_id ?? undefined,
+    batchIndex: row.batch_index ?? undefined,
+    parallelGroups,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at ?? undefined,
@@ -542,6 +804,26 @@ function toTask(row: TaskRow): Task & { runState: unknown } {
       costUSD: row.cost_usd,
     },
     runState: row.run_state ? JSON.parse(row.run_state) : null,
+  };
+}
+
+interface KnowledgeDocRow {
+  id: string; title: string; size_chars: number; created_at: string;
+}
+
+interface SteeringRow {
+  id: string; task_id: string; content: string; status: string;
+  created_at: string; injected_at: string | null;
+}
+
+function toSteering(row: SteeringRow): SteeringMessage {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    content: row.content,
+    status: row.status as SteeringMessage["status"],
+    createdAt: row.created_at,
+    injectedAt: row.injected_at ?? undefined,
   };
 }
 
@@ -629,5 +911,48 @@ function toSchedule(row: ScheduleRow): Schedule {
     lastRunAt: row.last_run_at ?? undefined,
     nextRunAt: row.next_run_at ?? undefined,
     createdAt: row.created_at,
+  };
+}
+
+interface ClarificationRow {
+  id: string; task_id: string; question: string; rationale: string | null;
+  answer: string | null; status: string; created_at: string; answered_at: string | null;
+}
+
+function toClarification(row: ClarificationRow): ClarificationQuestion {
+  return {
+    id: row.id,
+    taskId: row.task_id,
+    question: row.question,
+    rationale: row.rationale ?? undefined,
+    answer: row.answer ?? undefined,
+    status: row.status as ClarificationQuestion["status"],
+    createdAt: row.created_at,
+    answeredAt: row.answered_at ?? undefined,
+  };
+}
+
+interface PlaybookRow {
+  id: string; goal_pattern: string; summary: string; steps: string;
+  outcome: string; use_count: number; created_at: string; updated_at: string;
+}
+
+function toPlaybook(row: PlaybookRow): Playbook {
+  let steps: string[] = [];
+  try {
+    const parsed = JSON.parse(row.steps) as unknown;
+    if (Array.isArray(parsed)) steps = parsed.filter((s): s is string => typeof s === "string");
+  } catch {
+    // 损坏的步骤序列按空处理（召回时自然失效）
+  }
+  return {
+    id: row.id,
+    goalPattern: row.goal_pattern,
+    summary: row.summary,
+    steps,
+    outcome: row.outcome,
+    useCount: row.use_count,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
   };
 }

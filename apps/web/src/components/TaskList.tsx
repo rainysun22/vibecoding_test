@@ -12,6 +12,7 @@ interface TaskListProps {
 const STATUS_META: Record<TaskStatus, { label: string; tone: string }> = {
   pending: { label: "排队中", tone: "muted" },
   planning: { label: "拆解计划", tone: "info" },
+  awaiting_clarification: { label: "待澄清", tone: "warn" },
   executing: { label: "执行中", tone: "info" },
   verifying: { label: "校验中", tone: "info" },
   awaiting_approval: { label: "待审批", tone: "warn" },

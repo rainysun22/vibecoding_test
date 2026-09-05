@@ -11,14 +11,17 @@ import type { ProviderId } from "@openwork/types";
 export async function registerRoutes(app: FastifyInstance, runtime: OpenWorkRuntime): Promise<void> {
   /* ------------------------------ 委托任务 ------------------------------ */
 
-  app.post<{ Body: { goal: string; skillId?: string; autoApprove?: boolean } }>(
+  app.post<{ Body: { goal: string; skillId?: string; autoApprove?: boolean; parallel?: boolean; groups?: string[] } }>(
     "/api/tasks",
     async (request, reply) => {
-      const { goal, skillId } = request.body ?? { goal: "" };
+      const { goal, skillId, parallel, groups } = request.body ?? { goal: "" };
       if (!goal?.trim()) {
         return reply.status(400).send({ error: "invalid_request", message: "委托目标不能为空" });
       }
-      const task = await runtime.createTask(goal.trim(), { skillId });
+      // 并行委托：显式分组或按分隔词自动切分（v0.4 fork-join）
+      const task = parallel
+        ? await runtime.createParallelTask(goal.trim(), groups?.length ? groups : undefined)
+        : await runtime.createTask(goal.trim(), { skillId });
       return reply.status(201).send(task);
     },
   );
@@ -46,6 +49,81 @@ export async function registerRoutes(app: FastifyInstance, runtime: OpenWorkRunt
     const task = await runtime.resumeTask(request.params.id);
     if (!task) return reply.status(404).send({ error: "not_found", message: "任务不存在" });
     return task;
+  });
+
+  /** 中途转向：运行中任务排队用户指令（步骤间隙注入，v0.4） */
+  app.post<{ Params: { id: string }; Body: { content?: string } }>(
+    "/api/tasks/:id/steer",
+    async (request, reply) => {
+      const { content } = request.body ?? { content: "" };
+      if (!content?.trim()) {
+        return reply.status(400).send({ error: "invalid_request", message: "转向指令不能为空" });
+      }
+      try {
+        return reply.status(201).send(runtime.steerTask(request.params.id, content.trim()));
+      } catch (error) {
+        return reply.status(400).send({
+          error: "invalid_steering",
+          message: error instanceof Error ? error.message : "转向失败",
+        });
+      }
+    },
+  );
+
+  /** 任务的转向指令列表（含排队/已注入状态） */
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/steering", async (request) => {
+    return runtime.listSteeringMessages(request.params.id);
+  });
+
+  /** 并行委托的子任务清单（工作区隔离视图，v0.4） */
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/subtasks", async (request) => {
+    return runtime.listSubtasks(request.params.id);
+  });
+
+  /* ------------------------------ 主动澄清（v0.5） ------------------------------ */
+
+  /** 任务挂起的澄清问题（前端渲染澄清卡） */
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/clarifications", async (request) => {
+    return runtime.listClarifications(request.params.id);
+  });
+
+  /** 提交澄清答案（按问题顺序）或跳过（跳过 = 按现有信息继续） */
+  app.post<{ Params: { id: string }; Body: { answers?: string[]; skip?: boolean } }>(
+    "/api/tasks/:id/clarifications",
+    async (request, reply) => {
+      const { answers, skip } = request.body ?? {};
+      if (!skip && (!answers || answers.filter((a) => a?.trim()).length === 0)) {
+        return reply
+          .status(400)
+          .send({ error: "invalid_request", message: "answers 不能为空（或传 skip: true）" });
+      }
+      const task = await runtime.submitClarifications(
+        request.params.id,
+        (answers ?? []).map((a) => a?.trim() ?? ""),
+        Boolean(skip),
+      );
+      if (!task) return reply.status(404).send({ error: "not_found", message: "任务不存在" });
+      return task;
+    },
+  );
+
+  /** 步骤/任务置信度轨迹（置信度条与审计） */
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/confidence", async (request) => {
+    return (
+      runtime.getTaskConfidence(request.params.id) ?? { taskConfidence: null, steps: [] }
+    );
+  });
+
+  /* ------------------------------ 经验回放（v0.5） ------------------------------ */
+
+  /** 已固化的成功经验库（playbook 视图） */
+  app.get("/api/playbooks", async () => runtime.listPlaybooks());
+
+  /** 删除经验（用户治理低效 playbook） */
+  app.delete<{ Params: { id: string } }>("/api/playbooks/:id", async (request, reply) => {
+    const ok = runtime.deletePlaybook(request.params.id);
+    if (!ok) return reply.status(404).send({ error: "not_found", message: "经验不存在" });
+    return { ok: true };
   });
 
   /* ------------------------------ 审批 ------------------------------ */
@@ -175,6 +253,45 @@ export async function registerRoutes(app: FastifyInstance, runtime: OpenWorkRunt
     },
   );
 
+  /* ------------------------------ 知识库（v0.4） ------------------------------ */
+
+  app.get("/api/knowledge", async () => runtime.listKnowledgeDocs());
+
+  app.post<{ Body: { title?: string; content?: string } }>(
+    "/api/knowledge",
+    async (request, reply) => {
+      const { title, content } = request.body ?? {};
+      if (!content?.trim()) {
+        return reply.status(400).send({ error: "invalid_request", message: "文档内容不能为空" });
+      }
+      return reply.status(201).send(runtime.addKnowledgeDoc(title ?? "未命名文档", content));
+    },
+  );
+
+  app.delete<{ Params: { id: string } }>("/api/knowledge/:id", async (request, reply) => {
+    const ok = runtime.deleteKnowledgeDoc(request.params.id);
+    if (!ok) return reply.status(404).send({ error: "not_found", message: "文档不存在" });
+    return { ok: true };
+  });
+
+  /** 知识召回预览：查看查询会命中哪些私有文档 */
+  app.get<{ Querystring: { q?: string } }>("/api/knowledge/recall", async (request) => {
+    const q = (request.query as { q?: string }).q ?? "";
+    return runtime.recallKnowledgePreview(q);
+  });
+
+  /* ------------------------------ 用户画像（v0.4） ------------------------------ */
+
+  app.get("/api/profile", async () => runtime.getUserProfile());
+
+  app.put<{ Body: { about?: string; preferences?: string; voice?: string } }>(
+    "/api/profile",
+    async (request) => {
+      const { about, preferences, voice } = request.body ?? {};
+      return runtime.saveUserProfile({ about, preferences, voice });
+    },
+  );
+
   /* ------------------------------ 技能 ------------------------------ */
 
   app.get("/api/skills", async () => runtime.listSkills());
@@ -282,7 +399,7 @@ export async function registerRoutes(app: FastifyInstance, runtime: OpenWorkRunt
   app.get("/api/health", async () => ({
     status: "ok",
     product: "OpenWork",
-    version: "0.3.0",
+    version: "0.4.0",
     time: new Date().toISOString(),
   }));
 

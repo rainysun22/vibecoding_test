@@ -92,6 +92,7 @@ export interface ModelInfo {
 export type TaskStatus =
   | "pending"
   | "planning"
+  | "awaiting_clarification"
   | "awaiting_approval"
   | "executing"
   | "verifying"
@@ -130,12 +131,24 @@ export type TaskEventType =
   | "task.failed"
   | "task.cancelled"
   | "usage.recorded"
-  /* v0.4：知识库 / 画像 / 引用 / 并行委托 */
+  /* v0.4：知识库 / 画像 / 引用 / 并行委托 / 中途转向 */
   | "knowledge.recalled"
   | "subtask.spawned"
   | "subtask.completed"
   | "task.synthesizing"
-  | "sources.cited";
+  | "sources.cited"
+  | "steering.injected"
+  /* v0.5：主动澄清 / 置信度传播 / 经验回放 / 上下文压缩 / 批判-精炼 */
+  | "clarification.requested"
+  | "clarification.answered"
+  | "clarification.skipped"
+  | "confidence.updated"
+  | "confidence.warning"
+  | "playbook.recalled"
+  | "playbook.saved"
+  | "context.compacted"
+  | "refine.looping"
+  | "refine.completed";
 
 /** 一句话委托 */
 export interface Task {
@@ -298,6 +311,23 @@ export interface UserProfile {
   updatedAt?: string;
 }
 
+/* ============================== Steering ============================== */
+
+/**
+ * 中途转向（AgentGUI / Claude Code 式排队转向）：
+ * 任务运行期间用户随时下达修正指令，Agent 在步骤间隙（interstitial window）
+ * 读取并注入后续步骤 —— 非破坏性，不打断当前工作。
+ */
+export interface SteeringMessage {
+  id: string;
+  taskId: string;
+  content: string;
+  /** queued：等待注入 · injected：已被后续步骤吸收 · dismissed：任务终态后作废 */
+  status: "queued" | "injected" | "dismissed";
+  createdAt: string;
+  injectedAt?: string;
+}
+
 /* ============================== Skills ============================== */
 
 /** 技能：YAML 定义的可复用委托模板（N6 真需求：开放格式、可移植） */
@@ -345,4 +375,61 @@ export interface UsageSummary {
 export interface ApiError {
   error: string;
   message: string;
+}
+
+/* ============================== Clarifications (v0.5) ============================== */
+
+/**
+ * 主动澄清（Ask Early, Ask Late, Ask Right · arXiv:2605.07937）：
+ * 目标歧义在执行早期澄清价值最高（10% 后近乎归零），故规划前检测歧义并提问。
+ * 与中途转向互补：转向 = 执行中的非破坏修正；澄清 = 执行前的意图对齐。
+ */
+export interface ClarificationQuestion {
+  id: string;
+  taskId: string;
+  question: string;
+  /** 为什么问（预期信息增益说明） */
+  rationale?: string;
+  answer?: string;
+  status: "pending" | "answered" | "skipped";
+  createdAt: string;
+  answeredAt?: string;
+}
+
+/* ============================== Playbooks (v0.5) ============================== */
+
+/**
+ * 经验回放（SkillOS / HYPERSKILL / Voyager 式程序性记忆）：
+ * 成功任务的轨迹蒸馏为可复用 playbook，相似新任务召回注入规划器 —— 越用越强。
+ */
+export interface Playbook {
+  id: string;
+  /** 原任务目标（召回时的相似度匹配依据） */
+  goalPattern: string;
+  /** 计划摘要 */
+  summary: string;
+  /** 步骤标题序列（成功路径骨架） */
+  steps: string[];
+  /** 成功要点（来自校验结论） */
+  outcome: string;
+  /** 被召回次数（修剪依据：低效经验淘汰） */
+  useCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/* ============================== Confidence (v0.5) ============================== */
+
+/**
+ * 步骤置信度（Uncertainty Propagation · arXiv:2604.23505 / SAUP）：
+ * 早期误差跨步骤复合传播；每步打分并传播到任务级，低置信触发重采样自纠。
+ */
+export interface ConfidenceRecord {
+  stepId: string;
+  stepTitle: string;
+  /** 本步骤置信度（0-1，启发式：结构/长度/对冲语/证据强度） */
+  confidence: number;
+  /** 传播后的任务级置信度（乘性衰减：早期低置信拖累全局） */
+  taskConfidence: number;
+  at: string;
 }

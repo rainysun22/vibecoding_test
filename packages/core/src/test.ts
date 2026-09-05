@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 import { OpenWorkRuntime } from "./index.js";
 import { diffText } from "./diff.js";
 import { extractUrls, extractFilePaths } from "./tools.js";
+import { scoreStepConfidence } from "./confidence.js";
+import { compactStepResult } from "./context.js";
 
 /** 内置技能目录：仓库根 /skills（相对 dist 定位，避免依赖 cwd） */
 const SKILLS_DIR = fileURLToPath(new URL("../../../skills", import.meta.url));
@@ -356,6 +358,270 @@ async function testSkillInstall(): Promise<void> {
   });
 }
 
+/** v0.5：主动澄清 —— 歧义目标规划前挂起提问，答案注入后续跑 */
+async function testClarificationFlow(): Promise<void> {
+  // 明确目标：不应触发澄清（宁缺勿滥——过度提问比漏问更伤信任）
+  await withRuntime(true, async (runtime) => {
+    const clear = await runtime.createTask("写一份AI工作台市场分析");
+    await waitFor(() => runtime.getTask(clear.id)?.status === "completed");
+    assert.equal(
+      runtime.listClarifications(clear.id).length,
+      0,
+      "明确目标不应触发澄清",
+    );
+  });
+
+  // 歧义目标：规划前挂起澄清 → 提交答案 → 注入续跑 → 完成
+  await withRuntime(true, async (runtime) => {
+    const task = await runtime.createTask("写个报告");
+    await waitFor(() => runtime.getTask(task.id)?.status === "awaiting_clarification");
+
+    const questions = runtime.listClarifications(task.id);
+    assert.ok(questions.length >= 1, "应生成澄清问题");
+    assert.ok(questions.every((q) => q.status === "pending"), "问题应为待答状态");
+    assert.ok(
+      runtime.listEvents(task.id).some((e) => e.type === "clarification.requested"),
+      "应记录澄清请求事件",
+    );
+
+    const answers = questions.map(
+      (q, i) =>
+        i === 0 ? "AI 工作台行业趋势，面向企业决策者" : "详尽深度报告，包含数据与案例",
+    );
+    await runtime.submitClarifications(task.id, answers);
+    await waitFor(() => runtime.getTask(task.id)?.status === "completed");
+
+    assert.ok(
+      runtime.listClarifications(task.id).every((q) => q.status === "answered"),
+      "答案应全部落库",
+    );
+    assert.ok(
+      runtime.listEvents(task.id).some((e) => e.type === "clarification.answered"),
+      "应记录澄清回答事件",
+    );
+
+    // 澄清答案确实注入了写作链路（mock 回显验证注入闭环）
+    const [deliverable] = runtime
+      .listDeliverables()
+      .filter((d) => d.taskId === task.id);
+    const file = deliverable ? runtime.readDeliverable(deliverable.id) : null;
+    assert.ok(
+      file?.data.toString().includes("已落实澄清要求"),
+      "澄清答案应注入写作上下文",
+    );
+    console.log(`  ✓ 主动澄清：${questions.length} 问挂起 → 答案注入 → 完成`);
+  });
+
+  // 跳过澄清：按现有信息继续规划
+  await withRuntime(true, async (runtime) => {
+    const task = await runtime.createTask("随便写点东西");
+    await waitFor(() => runtime.getTask(task.id)?.status === "awaiting_clarification");
+    await runtime.submitClarifications(task.id, [], true);
+    await waitFor(() => runtime.getTask(task.id)?.status === "completed");
+    assert.ok(
+      runtime.listEvents(task.id).some((e) => e.type === "clarification.skipped"),
+      "应记录跳过事件",
+    );
+    console.log("  ✓ 主动澄清：跳过后按现有信息完成");
+  });
+}
+
+/** v0.5：步骤置信度传播 —— 每步打分 + 任务级传播 + 校验聚焦 */
+async function testConfidencePropagation(): Promise<void> {
+  // 评分函数单元行为：结构完整有数据 → 高置信；短且对冲 → 低置信
+  const high = scoreStepConfidence(
+    [
+      "# 研究笔记：AI 工作台市场分析",
+      "",
+      "## 背景与现状",
+      "- 2024 年全球 AI 工作台市场规模约 120 亿美元，年增长率 35%",
+      "- 头部玩家已形成差异化格局：微软 Copilot 深度绑定 Office 生态，OpenAI 依托 ChatGPT 入口",
+      "- 开放中立方案仍属稀缺，本地优先架构开始获得企业采购关注",
+      "- 典型客户画像：知识工作者密集型团队，月活 5000 人以上的中大型组织",
+      "",
+      "## 关键数据",
+      "| 指标 | 2023 | 2024 | 2025E |",
+      "| --- | --- | --- | --- |",
+      "| 市场规模（亿美元） | 65 | 120 | 190 |",
+      "| 付费渗透率 | 8% | 15% | 24% |",
+      "| 平均客单价（美元/年） | 240 | 280 | 320 |",
+      "",
+      "## 趋势判断",
+      "1. 任务式交付将取代对话式生成成为主流交互范式",
+      "2. 成本敏感客户会优先选择多模型路由 + 本地模型的混合架构",
+      "3. 语义级审批（一次审一版成果）将逐步取代逐工具确认的交互模式",
+      "4. 技能资产以开放格式跨平台流通将成为生态分水岭",
+    ].join("\n"),
+  );
+  assert.ok(high >= 0.8, `结构完整的产出应高置信（实际 ${(high * 100).toFixed(0)}%）`);
+
+  const low = scoreStepConfidence("这个问题我无法确定，也许需要更多资料，暂时缺少信息。");
+  assert.ok(low < 0.6, `对冲短输出应低置信（实际 ${(low * 100).toFixed(0)}%）`);
+
+  // 集成：任务执行全程记录置信度轨迹并传播到任务级
+  await withRuntime(true, async (runtime) => {
+    const task = await runtime.createTask("写一份AI工作台市场分析");
+    await waitFor(() => runtime.getTask(task.id)?.status === "completed");
+
+    const confidence = runtime.getTaskConfidence(task.id);
+    assert.ok(confidence, "应返回置信度轨迹");
+    assert.ok(
+      confidence!.steps.length >= 2,
+      "research 与 draft 步骤都应被打分",
+    );
+    // 乘性传播：任务置信度 = 各步骤置信度之积
+    const product = confidence!.steps.reduce((acc, s) => acc * s.confidence, 1);
+    assert.ok(
+      Math.abs(product - confidence!.taskConfidence) < 1e-9,
+      "任务置信度应为步骤置信度乘积",
+    );
+    assert.ok(
+      runtime.listEvents(task.id).some((e) => e.type === "confidence.updated"),
+      "应记录置信度更新事件",
+    );
+    assert.ok(
+      confidence!.taskConfidence > 0.5,
+      "正常产出任务置信度应保持健康",
+    );
+    console.log(
+      `  ✓ 置信度传播：${confidence!.steps.length} 步打分，任务置信度 ${(confidence!.taskConfidence * 100).toFixed(0)}%`,
+    );
+  });
+}
+
+/** v0.5：经验回放 —— 成功轨迹蒸馏入库 + 相似任务召回注入规划器 */
+async function testPlaybookReplay(): Promise<void> {
+  await withRuntime(true, async (runtime) => {
+    // 首个任务：无经验可召回，成功后蒸馏入库
+    const first = await runtime.createTask("写一份量子计算行业研究");
+    await waitFor(() => runtime.getTask(first.id)?.status === "completed");
+
+    assert.equal(runtime.listPlaybooks().length, 1, "成功任务应蒸馏出 playbook");
+    const [playbook] = runtime.listPlaybooks();
+    assert.ok(playbook!.steps.length >= 2, "playbook 应包含成功路径骨架");
+    assert.ok(playbook!.outcome.length > 0, "playbook 应包含成功要点");
+    assert.ok(
+      runtime.listEvents(first.id).some((e) => e.type === "playbook.saved"),
+      "应记录经验固化事件",
+    );
+
+    // 相似任务：召回注入规划器 + 计数增长
+    const second = await runtime.createTask("写一份量子计算技术调研");
+    await waitFor(() => runtime.getTask(second.id)?.status === "completed");
+
+    assert.ok(
+      runtime.listEvents(second.id).some((e) => e.type === "playbook.recalled"),
+      "相似任务应召回历史经验",
+    );
+    assert.equal(
+      runtime.listPlaybooks().length,
+      2,
+      "不同目标应新增经验（大粒度去重）",
+    );
+
+    // 同目标重复成功：合并刷新而非重复入库，且召回计数增长
+    const repeat = await runtime.createTask("写一份量子计算行业研究");
+    await waitFor(() => runtime.getTask(repeat.id)?.status === "completed");
+    const playbooks = runtime.listPlaybooks();
+    assert.equal(
+      playbooks.filter((p) => p.goalPattern === "写一份量子计算行业研究").length,
+      1,
+      "同目标重复成功应合并刷新",
+    );
+    const reused = playbooks.find((p) => p.goalPattern === "写一份量子计算行业研究")!;
+    assert.ok(reused.useCount >= 1, "召回应累计使用次数");
+
+    // 用户治理：删除经验
+    assert.ok(runtime.deletePlaybook(reused.id), "应可删除经验");
+    assert.ok(
+      !runtime.listPlaybooks().some((p) => p.id === reused.id),
+      "删除后不应存在",
+    );
+    console.log(`  ✓ 经验回放：蒸馏入库 → 相似召回 → 去重刷新 → 治理删除`);
+  });
+}
+
+/** v0.5：上下文压缩 —— 远期步骤要点化（结构行保留 + 预算控制） */
+async function testContextCompaction(): Promise<void> {
+  // 短产出不动
+  const short = "# 笔记\n- 要点一";
+  assert.equal(compactStepResult(short), short, "预算内不应压缩");
+
+  // 长结构化产出：保留骨架（标题/列表/表格），压缩后带标记且在预算附近
+  const long = [
+    "# 研究笔记：长期任务上下文管理",
+    "",
+    ...Array.from({ length: 40 }, (_, i) => `第 ${i} 段散文内容。`.repeat(20)),
+    "## 关键要点",
+    ...Array.from(
+      { length: 24 },
+      (_, i) => `- 要点${i + 1}：长程任务的远期历史应要点化以对抗注意力稀释`,
+    ),
+    "| 指标 | v1 | v2 |",
+    "| --- | --- | --- |",
+    "| 上下文长度 | 40k | 12k |",
+  ].join("\n");
+  const compacted = compactStepResult(long);
+  assert.ok(compacted.startsWith("【已压缩："), "压缩后应带标记");
+  assert.ok(compacted.length < long.length / 2, "压缩应显著缩减体量");
+  assert.ok(compacted.includes("## 关键要点"), "结构行应保留");
+  assert.ok(compacted.includes("| 指标 | v1 | v2 |"), "表格行应保留");
+
+  // 散文式长产出（结构行过少）：回退原文截断，仍有标记
+  const prose = "这是一段很长的散文内容，没有任何结构。".repeat(100);
+  const compactedProse = compactStepResult(prose);
+  assert.ok(compactedProse.startsWith("【已压缩："), "散文超限也应压缩");
+  assert.ok(compactedProse.length <= 1300, "截断后应在预算附近");
+  console.log(
+    `  ✓ 上下文压缩：${long.length.toLocaleString()} → ${compacted.length.toLocaleString()} 字符（骨架保留）`,
+  );
+}
+
+/** v0.5：批判-精炼循环 —— revise 判定 → 带批评重写 → 版本化 → 复检通过 */
+async function testRefineLoop(): Promise<void> {
+  await withRuntime(true, async (runtime) => {
+    // 目标含「精炼」：mock VERIFIER 初检 revise（含 3 条结构化批评），复检 pass
+    const task = await runtime.createTask("写一份需要精炼的市场报告");
+    await waitFor(() => runtime.getTask(task.id)?.status === "completed");
+
+    const events = runtime.listEvents(task.id);
+    const types = events.map((e) => e.type);
+    assert.ok(types.includes("refine.looping"), "应记录精炼循环启动事件");
+    assert.ok(types.includes("refine.completed"), "应记录精炼完成事件");
+    assert.ok(types.includes("deliverable.versioned"), "精炼应产出成果新版本");
+
+    const looping = events.find((e) => e.type === "refine.looping")!;
+    assert.ok(
+      (looping.detail ?? "").includes("引言未点明委托背景"),
+      "循环事件应携带结构化批评",
+    );
+
+    // 成果版本链：v1 初稿 → v2 精炼版（git 化 diff 的基础）
+    const [deliverable] = runtime
+      .listDeliverables()
+      .filter((d) => d.taskId === task.id);
+    assert.ok(deliverable, "应存在成果");
+    assert.equal(deliverable.version, 2, "精炼后应为 v2");
+    const versions = runtime.listVersions(deliverable.id);
+    assert.equal(versions.length, 2, "应有两条版本记录");
+
+    const file = runtime.readDeliverable(deliverable.id)!;
+    assert.ok(
+      file.data.toString().includes("【已精炼】"),
+      "成果应为精炼后正文",
+    );
+    assert.ok(
+      file.data.toString().includes("已落实："),
+      "批评条目应被逐条落实回显",
+    );
+
+    // 复检通过：最终校验结论为 pass
+    const source = file.data.toString();
+    assert.ok(!source.includes("待改进正文"), "精炼输出不应残留提示词结构");
+    console.log("  ✓ 批判-精炼：revise 判定 → 3 条批评重写 → v2 版本化 → 复检通过");
+  });
+}
+
 async function main(): Promise<void> {
   await testAutoApproveFlow();
   await testManualApprovalFlow();
@@ -371,6 +637,11 @@ async function main(): Promise<void> {
   await testRevisionFlow();
   await testResumeFlows();
   await testSkillInstall();
+  await testClarificationFlow();
+  await testConfidencePropagation();
+  await testPlaybookReplay();
+  await testContextCompaction();
+  await testRefineLoop();
   console.log("core: 全部测试通过");
 }
 
