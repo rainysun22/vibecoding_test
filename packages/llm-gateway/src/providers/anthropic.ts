@@ -42,7 +42,10 @@ export class AnthropicProvider implements LLMProvider {
         },
         body: JSON.stringify({
           model: shortName,
-          system: system || undefined,
+          // v0.6 token 优化：system 作为稳定前缀打 cache_control 标记。
+          // 同任务内多次同角色调用（如多个研究步骤）命中缓存，免重复 prefill，
+          // agentic 场景成本降 45-80%、TTFT 降 13-31%（arXiv:2601.06007）。
+          system: system ? [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] : undefined,
           messages: rest,
           max_tokens: maxTokens ?? 8192,
           ...(temperature !== undefined && { temperature }),
@@ -86,7 +89,8 @@ export class AnthropicProvider implements LLMProvider {
         },
         body: JSON.stringify({
           model: shortName,
-          system: system || undefined,
+          // v0.6 token 优化：与 complete 相同 —— system 前缀打 cache_control
+          system: system ? [{ type: "text", text: system, cache_control: { type: "ephemeral" } }] : undefined,
           messages: rest,
           max_tokens: maxTokens ?? 8192,
           stream: true,

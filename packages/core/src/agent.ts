@@ -591,11 +591,16 @@ export class AgentRunner {
         );
       }
       case "draft": {
-        const researchNotes = state.stepResults
-          .map((result, index) => ({ result, kind: state.plan?.steps[index]?.kind }))
-          .filter((entry) => entry.kind === "research")
-          .map((entry) => entry.result)
-          .join("\n\n");
+        // v0.6 token 优化：研究笔记超限时骨架化（保留全部标题/要点/表格，
+        // 压缩散文冗余）。低于预算时原样返回，不影响正常路径。
+        const researchNotes = compactStepResult(
+          state.stepResults
+            .map((result, index) => ({ result, kind: state.plan?.steps[index]?.kind }))
+            .filter((entry) => entry.kind === "research")
+            .map((entry) => entry.result)
+            .join("\n\n"),
+          8_000,
+        );
 
         // 修订委托：注入原版本正文 + 修订反馈
         let revisionSection = "";
@@ -639,18 +644,22 @@ export class AgentRunner {
         const subtasks = this.storage.listSubtasks(task.id);
         if (subtasks.length === 0) throw new Error("并行委托缺少子任务");
 
-        const notes = subtasks
-          .map((sub, index) => {
-            const [deliverable] = this.storage.listDeliverablesByTask(sub.id);
-            const body = deliverable ? this.store.readSource(deliverable.id, deliverable.version) : null;
-            this.emitEvent(
-              task.id,
-              "subtask.completed",
-              `子任务 ${index + 1}/${subtasks.length} 成果已汇入：${sub.goal.slice(0, 50)}`,
-            );
-            return `【子任务 ${index + 1}：${sub.goal}】\n${body ?? "（无成果：状态 " + sub.status + "）"}`;
-          })
-          .join("\n\n");
+        const notes = compactStepResult(
+          subtasks
+            .map((sub, index) => {
+              const [deliverable] = this.storage.listDeliverablesByTask(sub.id);
+              const body = deliverable ? this.store.readSource(deliverable.id, deliverable.version) : null;
+              this.emitEvent(
+                task.id,
+                "subtask.completed",
+                `子任务 ${index + 1}/${subtasks.length} 成果已汇入：${sub.goal.slice(0, 50)}`,
+              );
+              return `【子任务 ${index + 1}：${sub.goal}】\n${body ?? "（无成果：状态 " + sub.status + "）"}`;
+            })
+            .join("\n\n"),
+          // v0.6 token 优化：子任务成果超限时骨架化（聚合只需要要点，全文冗余）
+          16_000,
+        );
 
         const content = await this.llm(
           task.id,
@@ -860,6 +869,9 @@ export class AgentRunner {
 
   /** 校验单次调用（初检与精炼后复检共用；v0.5 低置信步骤为核查重点） */
   private verifyDraft(task: Task, draft: string, weakSection: string): Promise<string> {
+    // v0.6 token 优化：校验输入骨架化——质量门看「结构是否满足目标」，
+    // 骨架保留全部标题/要点/表格，比纯截断信息密度更高、输入更省。
+    const skeleton = compactStepResult(draft, 5_000);
     return this.llm(
       task.id,
       "VERIFIER",
@@ -868,7 +880,7 @@ export class AgentRunner {
           role: "user",
           content: [
             `委托目标：${task.goal}`,
-            `成果正文：\n${draft.slice(0, 8000)}`,
+            `成果正文${skeleton !== draft ? "（已骨架化摘要）" : ""}：\n${skeleton}`,
             weakSection,
             "请校验成果是否满足委托目标，输出 JSON：{verdict, score, strengths[], issues[]}",
           ]
@@ -1103,6 +1115,16 @@ export class AgentRunner {
     options: { streamId?: string } = {},
   ): Promise<string> {
     const model = this.gateway.modelForPurpose(purpose);
+    // v0.6 token 优化：输出 token 最贵，按调用性质设上限防失控膨胀。
+    // 规划/校验/标题本就该短——上限是「防呆保险」，不压缩正常产出。
+    const maxTokens =
+      marker === "TITLE_MAKER"
+        ? 100
+        : purpose === "planning"
+          ? 2_000
+          : purpose === "verifying"
+            ? 1_500
+            : undefined;
     const request: CompletionRequest = {
       model,
       messages: [
@@ -1116,6 +1138,7 @@ export class AgentRunner {
         ...messages,
       ],
       temperature: purpose === "execution" ? 0.7 : 0.2,
+      ...(maxTokens !== undefined && { maxTokens }),
     };
 
     // 流式优先：正文/研究笔记逐字直达前端（首字延迟从秒级降到百毫秒级）
