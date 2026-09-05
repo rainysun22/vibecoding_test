@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+dist/
+*.tsbuildinfo
+
+# Runtime data (local-first, never commit user data)
+data/
+workspaces/
+
+# Environment
+.env
+.env.local
+
+# IDE / OS
+.DS_Store
+*.log
+.trae-html-share-packages/

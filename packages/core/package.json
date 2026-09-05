@@ -1,0 +1,30 @@
+{
+  "name": "@openwork/core",
+  "version": "0.1.0",
+  "description": "OpenWork Agent 运行时：plan→act→verify 循环、语义级审批、定时委托、Skills、本地存储",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node dist/test.js"
+  },
+  "dependencies": {
+    "@openwork/types": "0.1.0",
+    "@openwork/llm-gateway": "0.1.0",
+    "@openwork/deliverables": "0.1.0",
+    "croner": "^9.0.0",
+    "yaml": "^2.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.0"
+  }
+}

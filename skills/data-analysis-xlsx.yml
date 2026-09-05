@@ -1,0 +1,6 @@
+id: data-analysis-xlsx
+name: 数据分析表格
+description: 提取/整理数据并交付 Excel 工作簿（xlsx 开放格式，含数据页）
+outputFormat: xlsx
+planHints: 收集数据要点（含表格），交付 xlsx 成果
+suggestedTier: balanced

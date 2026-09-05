@@ -1,0 +1,6 @@
+id: build-presentation
+name: 演示文稿
+description: 将委托内容转化为幻灯片并交付 PowerPoint（pptx 开放格式）
+outputFormat: pptx
+planHints: 提炼核心论点与数据，交付 pptx 成果
+suggestedTier: flagship

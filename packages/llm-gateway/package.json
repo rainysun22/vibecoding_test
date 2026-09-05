@@ -1,0 +1,25 @@
+{
+  "name": "@openwork/llm-gateway",
+  "version": "0.1.0",
+  "description": "OpenWork 多模型网关：统一协议、任意 LLM、成本路由、用量核算",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node dist/test.js"
+  },
+  "dependencies": {
+    "@openwork/types": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

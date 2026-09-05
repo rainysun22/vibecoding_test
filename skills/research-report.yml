@@ -1,0 +1,6 @@
+id: research-report
+name: 深度研究报告
+description: 围绕委托目标开展研究并交付结构化 Markdown 报告
+outputFormat: markdown
+planHints: 先研究后撰写，最后交付 markdown 成果
+suggestedTier: flagship

@@ -1,0 +1,6 @@
+id: publish-html
+name: 网页发布
+description: 撰写内容并交付自包含 HTML 单文件（任何平台可直接打开）
+outputFormat: html
+planHints: 撰写适合网页阅读的内容，交付 html 成果
+suggestedTier: balanced

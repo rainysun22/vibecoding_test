@@ -1,0 +1,6 @@
+id: write-report-docx
+name: Word 报告
+description: 撰写并交付标准 Word 文档（docx 开放格式）
+outputFormat: docx
+planHints: 研究要点后撰写正文，最终交付 docx 文件
+suggestedTier: flagship
