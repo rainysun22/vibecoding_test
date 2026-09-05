@@ -41,6 +41,13 @@ export async function registerRoutes(app: FastifyInstance, runtime: OpenWorkRunt
     return runtime.listEvents(request.params.id, Number(query.after ?? 0) || 0);
   });
 
+  /** 断点续跑：恢复中断的任务（与进行中的运行互斥，任务锁保证） */
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/resume", async (request, reply) => {
+    const task = await runtime.resumeTask(request.params.id);
+    if (!task) return reply.status(404).send({ error: "not_found", message: "任务不存在" });
+    return task;
+  });
+
   /* ------------------------------ 审批 ------------------------------ */
 
   app.get("/api/checkpoints", async () => runtime.listPendingCheckpoints());
@@ -118,9 +125,76 @@ export async function registerRoutes(app: FastifyInstance, runtime: OpenWorkRunt
     },
   );
 
+  /** 版本间结构化对比（v0.3：成果 diff，git 化体验） */
+  app.get<{ Params: { id: string }; Querystring: { from?: string; to?: string } }>(
+    "/api/deliverables/:id/diff",
+    async (request, reply) => {
+      const meta = runtime.getDeliverable(request.params.id);
+      if (!meta) return reply.status(404).send({ error: "not_found", message: "成果不存在" });
+
+      const versions = runtime.listVersions(meta.id).map((v) => v.version).sort((a, b) => a - b);
+      if (versions.length < 2) {
+        return reply.status(400).send({
+          error: "no_diff_target",
+          message: "只有一个版本，无对比对象 —— 修订后可生成新版本",
+        });
+      }
+
+      const to = Number(request.query.to ?? 0) || meta.version;
+      const from =
+        Number(request.query.from ?? 0) ||
+        (versions.filter((v) => v < to).pop() ?? versions[0]!);
+      try {
+        return runtime.diffDeliverable(meta.id, from, to);
+      } catch (error) {
+        return reply.status(400).send({
+          error: "invalid_diff",
+          message: error instanceof Error ? error.message : "版本对比失败",
+        });
+      }
+    },
+  );
+
+  /** 修订委托：基于既有成果 + 反馈生成新版本（v0.3） */
+  app.post<{ Params: { id: string }; Body: { feedback?: string } }>(
+    "/api/deliverables/:id/revise",
+    async (request, reply) => {
+      const { feedback } = request.body ?? { feedback: "" };
+      if (!feedback?.trim()) {
+        return reply.status(400).send({ error: "invalid_request", message: "修订反馈不能为空" });
+      }
+      try {
+        const task = await runtime.reviseDeliverable(request.params.id, feedback.trim());
+        return reply.status(201).send(task);
+      } catch (error) {
+        return reply.status(404).send({
+          error: "not_found",
+          message: error instanceof Error ? error.message : "成果不存在",
+        });
+      }
+    },
+  );
+
   /* ------------------------------ 技能 ------------------------------ */
 
   app.get("/api/skills", async () => runtime.listSkills());
+
+  /** 技能市场（最小实现）：从 URL 或 YAML 内容安装第三方技能 */
+  app.post<{ Body: { url?: string; content?: string } }>(
+    "/api/skills/install",
+    async (request, reply) => {
+      const { url, content } = request.body ?? {};
+      try {
+        const skill = url ? await runtime.installSkillFromUrl(url) : runtime.installSkillYaml(content ?? "");
+        return reply.status(201).send(skill);
+      } catch (error) {
+        return reply.status(400).send({
+          error: "invalid_skill",
+          message: error instanceof Error ? error.message : "技能安装失败",
+        });
+      }
+    },
+  );
 
   /* ------------------------------ 定时委托 ------------------------------ */
 
@@ -208,7 +282,7 @@ export async function registerRoutes(app: FastifyInstance, runtime: OpenWorkRunt
   app.get("/api/health", async () => ({
     status: "ok",
     product: "OpenWork",
-    version: "0.1.0",
+    version: "0.3.0",
     time: new Date().toISOString(),
   }));
 

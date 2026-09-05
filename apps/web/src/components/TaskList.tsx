@@ -5,6 +5,8 @@ interface TaskListProps {
   selectedId: string | null;
   onSelect: (id: string) => void;
   pendingCount: number;
+  /** 断点续跑（v0.3）：中断任务手动恢复 */
+  onResume?: (id: string) => void;
 }
 
 const STATUS_META: Record<TaskStatus, { label: string; tone: string }> = {
@@ -18,6 +20,9 @@ const STATUS_META: Record<TaskStatus, { label: string; tone: string }> = {
   cancelled: { label: "已取消", tone: "muted" },
 };
 
+/** 可续跑状态：非终态且非审批暂停（与 Runtime.resumeTask 的判断一致） */
+const RESUMABLE: ReadonlySet<TaskStatus> = new Set(["pending", "planning", "executing", "verifying"]);
+
 function formatTime(iso: string): string {
   const date = new Date(iso);
   const diffMinutes = (Date.now() - date.getTime()) / 60_000;
@@ -27,7 +32,7 @@ function formatTime(iso: string): string {
   return date.toLocaleDateString("zh-CN");
 }
 
-export function TaskList({ tasks, selectedId, onSelect, pendingCount }: TaskListProps) {
+export function TaskList({ tasks, selectedId, onSelect, pendingCount, onResume }: TaskListProps) {
   return (
     <div className="task-list">
       <div className="list-head">
@@ -41,8 +46,9 @@ export function TaskList({ tasks, selectedId, onSelect, pendingCount }: TaskList
           {tasks.map((task) => {
             const meta = STATUS_META[task.status];
             const active = task.id === selectedId;
+            const resumable = RESUMABLE.has(task.status);
             return (
-              <li key={task.id}>
+              <li key={task.id} className={`task-row ${active ? "active" : ""}`}>
                 <button
                   className={`task-item ${active ? "active" : ""}`}
                   onClick={() => onSelect(task.id)}
@@ -54,6 +60,15 @@ export function TaskList({ tasks, selectedId, onSelect, pendingCount }: TaskList
                     <span className="task-time">{formatTime(task.createdAt)}</span>
                   </span>
                 </button>
+                {resumable && onResume && (
+                  <button
+                    className="task-resume"
+                    title="从中断处续跑（与进行中的运行互斥，任务锁保证）"
+                    onClick={() => onResume(task.id)}
+                  >
+                    ▶ 续跑
+                  </button>
+                )}
               </li>
             );
           })}

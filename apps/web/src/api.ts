@@ -1,5 +1,6 @@
 import type {
   Checkpoint,
+  DeliverableDiff,
   DeliverableMeta,
   DeliverableVersion,
   ProviderConfig,
@@ -53,6 +54,11 @@ export function getTask(id: string): Promise<TaskDetail> {
   return request(`/api/tasks/${id}`);
 }
 
+/** 断点续跑：恢复中断的任务 */
+export function resumeTask(id: string): Promise<Task> {
+  return request(`/api/tasks/${id}/resume`, { method: "POST" });
+}
+
 /* ------------------------------ 审批 ------------------------------ */
 
 export function listPendingCheckpoints(): Promise<Checkpoint[]> {
@@ -99,10 +105,31 @@ export async function previewDeliverable(id: string, version?: number): Promise<
   return response.text();
 }
 
+/** 版本间结构化对比（v0.3：成果 diff） */
+export function getDeliverableDiff(id: string, from: number, to: number): Promise<DeliverableDiff> {
+  return request(`/api/deliverables/${id}/diff?from=${from}&to=${to}`);
+}
+
+/** 修订委托：基于反馈生成新版本（v0.3） */
+export function reviseDeliverable(id: string, feedback: string): Promise<Task> {
+  return request(`/api/deliverables/${id}/revise`, {
+    method: "POST",
+    body: JSON.stringify({ feedback }),
+  });
+}
+
 /* ------------------------------ 技能 / 定时 ------------------------------ */
 
 export function listSkills(): Promise<SkillDefinition[]> {
   return request("/api/skills");
+}
+
+/** 技能市场（最小实现）：从 URL 或 YAML 内容安装第三方技能 */
+export function installSkill(source: { url?: string; content?: string }): Promise<SkillDefinition> {
+  return request("/api/skills/install", {
+    method: "POST",
+    body: JSON.stringify(source),
+  });
 }
 
 export function listSchedules(): Promise<Schedule[]> {

@@ -563,6 +563,196 @@ body {
   word-break: break-word;
 }
 
+/* ------------------------------ 版本链 / 修订 / diff（v0.3） ------------------------------ */
+
+.version-chain {
+  margin-left: 8px;
+  color: var(--accent-bright);
+}
+
+.revise-form {
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+}
+
+.revise-label {
+  font-size: 12px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.revise-input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  color: var(--text);
+  padding: 8px;
+  font-size: 12px;
+  font-family: var(--font);
+  resize: vertical;
+}
+
+.revise-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.revise-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.diff-view {
+  margin-top: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.diff-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--bg-raised);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.diff-toolbar select {
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.diff-arrow {
+  color: var(--text-muted);
+}
+
+.diff-stat {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.diff-added {
+  color: var(--ok);
+}
+
+.diff-removed {
+  color: var(--err);
+}
+
+.diff-loading {
+  padding: 14px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.diff-lines {
+  max-height: 340px;
+  overflow-y: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.diff-line {
+  display: flex;
+  gap: 0;
+  align-items: stretch;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-line .diff-no {
+  flex: 0 0 36px;
+  text-align: right;
+  padding-right: 6px;
+  color: var(--text-muted);
+  user-select: none;
+  border-right: 1px solid var(--border);
+}
+
+.diff-line .diff-sign {
+  flex: 0 0 16px;
+  text-align: center;
+  user-select: none;
+}
+
+.diff-line .diff-text {
+  flex: 1;
+  padding-right: 8px;
+}
+
+.diff-line.ctx {
+  color: var(--text-muted);
+}
+
+.diff-line.add {
+  background: rgba(47, 158, 110, 0.14);
+}
+
+.diff-line.add .diff-sign,
+.diff-line.add .diff-text {
+  color: var(--ok);
+}
+
+.diff-line.del {
+  background: rgba(224, 85, 85, 0.12);
+}
+
+.diff-line.del .diff-sign,
+.diff-line.del .diff-text {
+  color: var(--err);
+}
+
+/* ------------------------------ 任务续跑按钮 ------------------------------ */
+
+.task-row {
+  position: relative;
+}
+
+.task-row .task-resume {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-raised);
+  color: var(--accent-bright);
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.task-row:hover .task-resume,
+.task-row.active .task-resume {
+  opacity: 1;
+}
+
+.task-row .task-resume:hover {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #fff;
+}
+
 /* ------------------------------ 按钮 / 徽标 ------------------------------ */
 
 .btn {

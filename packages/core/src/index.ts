@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type {
   Checkpoint,
+  DeliverableDiff,
   DeliverableMeta,
   ProviderConfig,
   ProviderId,
@@ -18,6 +19,7 @@ import { AgentRunner } from "./agent.js";
 import { SkillRegistry } from "./skills.js";
 import { Scheduler } from "./scheduler.js";
 import { EventBus, type RuntimeEventPayload } from "./events.js";
+import { buildDeliverableDiff } from "./diff.js";
 
 export interface RuntimeOptions {
   /** 数据目录（本地优先：全部状态落本机） */
@@ -82,13 +84,16 @@ export class OpenWorkRuntime {
       void this.createTask(goal, { skillId });
     });
     this.scheduler.start();
+
+    // 断点恢复：进程重启后从中断处续跑（审批暂停的任务除外）
+    this.resumeInterrupted();
   }
 
   /* ------------------------------ 委托任务 ------------------------------ */
 
   async createTask(
     goal: string,
-    options: { skillId?: string; autoRun?: boolean } = {},
+    options: { skillId?: string; autoRun?: boolean; revisionOf?: Task["revisionOf"] } = {},
   ): Promise<Task> {
     const now = new Date().toISOString();
     const task: Task = {
@@ -96,6 +101,7 @@ export class OpenWorkRuntime {
       goal,
       status: "pending",
       skillId: options.skillId,
+      revisionOf: options.revisionOf,
       createdAt: now,
       updatedAt: now,
       usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0, costUSD: 0 },
@@ -118,6 +124,50 @@ export class OpenWorkRuntime {
 
   getTask(id: string): Task | null {
     return this.storage.getTask(id);
+  }
+
+  /**
+   * 恢复被中断的任务（进程重启 / 手动续跑）。
+   * 任务锁保证与进行中的运行不冲突；等待审批的任务不在此列（那是刻意的暂停）。
+   */
+  async resumeTask(id: string): Promise<Task | null> {
+    const task = this.storage.getTask(id);
+    if (!task) return null;
+    if (["completed", "failed", "cancelled", "awaiting_approval"].includes(task.status)) {
+      return task; // 终态或审批暂停：无需恢复
+    }
+
+    // 续跑事件同时落库（轨迹可回放）并广播（前端实时刷新）
+    const event: TaskEvent = {
+      id: randomUUID(),
+      taskId: id,
+      seq: this.storage.nextSeq(id),
+      type: "task.resumed",
+      title: "断点续跑：从中断处恢复执行",
+      createdAt: new Date().toISOString(),
+    };
+    this.storage.appendEvent(event);
+    this.bus.emit("task.resumed", {
+      type: "task.resumed",
+      taskId: id,
+      title: event.title,
+      at: event.createdAt,
+    });
+
+    void this.agent.run(id).catch(() => {
+      // 错误已在 agent 内落库并广播
+    });
+    return task;
+  }
+
+  /** 启动时恢复所有中断任务（v0.3：断点恢复） */
+  private resumeInterrupted(): void {
+    const interrupted = this.storage
+      .listTasks(10_000)
+      .filter((t) => !["completed", "failed", "cancelled", "awaiting_approval"].includes(t.status));
+    for (const task of interrupted) {
+      void this.resumeTask(task.id);
+    }
   }
 
   listTasks(limit?: number): Task[] {
@@ -183,10 +233,51 @@ export class OpenWorkRuntime {
     return this.storage.listVersions(deliverableId);
   }
 
+  /** 修订委托：基于既有成果 + 反馈生成新版本（成果 git 化闭环） */
+  async reviseDeliverable(id: string, feedback: string): Promise<Task> {
+    const meta = this.storage.getDeliverable(id);
+    if (!meta) throw new Error("成果不存在");
+    if (!this.store.exists(id)) throw new Error("成果文件缺失，无法修订");
+
+    return this.createTask(`修订成果「${meta.title}」`, {
+      revisionOf: { deliverableId: id, feedback },
+    });
+  }
+
+  /** 版本间结构化对比（基于版本源 Markdown，与导出格式无关） */
+  diffDeliverable(id: string, from: number, to: number): DeliverableDiff {
+    const meta = this.storage.getDeliverable(id);
+    if (!meta) throw new Error("成果不存在");
+
+    const versions = this.storage.listVersions(id).map((v) => v.version);
+    if (!versions.includes(from) || !versions.includes(to)) {
+      throw new Error(`版本不存在：可用版本 ${versions.join(", ")}`);
+    }
+
+    const oldText = this.store.readSource(id, from) ?? "";
+    const newText = this.store.readSource(id, to) ?? "";
+    if (!oldText && !newText) {
+      throw new Error("该成果版本缺少源文本（旧版本数据），无法对比");
+    }
+    return buildDeliverableDiff(id, from, to, oldText, newText);
+  }
+
   /* ------------------------------ 技能 ------------------------------ */
 
   listSkills(): SkillDefinition[] {
     return this.skills.list();
+  }
+
+  /** 从 YAML 内容安装技能（写入用户技能目录并热加载） */
+  installSkillYaml(content: string): SkillDefinition {
+    return this.skills.install(content, join(this.storage.dataDir, "skills"));
+  }
+
+  /** 从 URL 安装第三方技能（技能市场的最小实现） */
+  async installSkillFromUrl(url: string): Promise<SkillDefinition> {
+    const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+    if (!response.ok) throw new Error(`下载失败：HTTP ${response.status}`);
+    return this.installSkillYaml(await response.text());
   }
 
   /* ------------------------------ 调度 ------------------------------ */

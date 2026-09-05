@@ -10,8 +10,10 @@
 ├─────────────────────────────────────────────────────────────┤
 │  运行时    @openwork/core                                     │
 │   ├─ AgentRunner    plan → act → verify + 语义级审批          │
+│   ├─ ToolSystem     URL 抓取 + 本地文件读取（research 数据源）│
+│   ├─ DiffEngine     版本间行级结构化对比（LCS）               │
 │   ├─ Scheduler      cron 定时委托                             │
-│   ├─ SkillRegistry  YAML 技能资产                             │
+│   ├─ SkillRegistry  YAML 技能资产（安装校验 + 热加载）        │
 │   └─ Storage        node:sqlite（零原生依赖）                 │
 ├─────────────────────────────────────────────────────────────┤
 │  模型层    @openwork/llm-gateway                              │
@@ -58,11 +60,38 @@ finish ─────── status = completed，成果可下载
 
 成本路由按任务性质选模型：`planning` / `verifying` 用 `plannerModel`（强模型），`execution` 用 `defaultModel`（经济模型）。每次调用的 token 与费用实时归集到任务台账与全局 usage_log。
 
+## 工具系统（core/tools.ts）
+
+research 步骤的真实数据源，从用户目标与已审批指令中提取显式引用：
+
+- **网页抓取**：`http(s)://` URL（剔除中英文标点），原生 fetch + Readability 风格正文清洗，10s 超时
+- **本地文件读取**：绝对路径 / `~/` / `./` 相对路径，文本文件直接读取（二进制报错而非崩溃）
+- 每个来源成功（`tool.executed`）或失败（`tool.failed`）均落审计事件，来源与用量对用户完全透明
+- 单步来源数有上限（防指令注入式轰炸），失败不阻塞——LLM 仍可基于常识完成步骤
+
+## 成果修订与 diff（core/diff.ts）
+
+- **修订闭环**：`reviseDeliverable(id, feedback)` 创建关联任务（`revisionOf`），完成后向同一成果追加新版本，形成 v1 → v2 → … 版本链
+- **行级 diff**：LCS 算法计算统一 diff（超长文本回退为整删整增），输出增/删/上下文行 + 双侧行号 + 统计
+- diff 基于版本源 Markdown（`deliverable_versions` 持久化），与导出格式（docx 等）无关
+
+## 断点恢复
+
+- `RunState` 持久化于 `tasks.run_state`，进程重启时对所有非终态任务自动续跑
+- **任务锁**：内存级 `active` 集合保证同一任务不并发执行（锁丢失即恢复）
+- 恢复动作落 `task.resumed` 事件（轨迹可回放）并经 SSE 广播（前端实时刷新）
+
+## 技能安装（core/skills.ts）
+
+- 支持 YAML 内容 / URL 两种安装来源（`installSkill`）
+- 安装即校验：必填字段（name / goal / output）、输出格式合法值、名称唯一性，失败返回结构化错误
+- 校验通过后落盘 `skills/` 并热加载——无需重启即可用于新委托
+
 ## 成果版本化（deliverables + deliverable-store）
 
 - 每个成果以 SHA-256 内容寻址：`deliverables/<id>/v<n>.<ext>`
-- 版本链记录于 `deliverable_versions` 表（版本号 / 内容哈希 / 字节数 / 来源任务）
-- 同一内容不重复落盘，天然支持回滚与审计
+- 版本链记录于 `deliverable_versions` 表（版本号 / 内容哈希 / 字节数 / 来源任务 / 修订备注）
+- 同一内容不重复落盘，天然支持回滚、审计与版本 diff
 
 ## 语义级审批
 

@@ -19,6 +19,7 @@ export class DeliverableStore {
     meta: DeliverableMeta,
     output: GenerateOutput,
     note?: string,
+    sourceMarkdown?: string,
   ): DeliverableVersion {
     const contentHash = sha256(output.data);
     const sizeBytes = output.data.length;
@@ -37,6 +38,10 @@ export class DeliverableStore {
     writeFileSync(join(dir, `v${meta.version}.${output.extension}`), output.data);
     // 内容寻址副本（相同内容天然去重的审计锚点）
     writeFileSync(join(dir, `${contentHash}.${output.extension}`), output.data);
+    // 版本源 Markdown：修订与 diff 的统一文本基础（与导出格式解耦）
+    if (sourceMarkdown !== undefined) {
+      writeFileSync(join(dir, `v${meta.version}.source.md`), sourceMarkdown, "utf-8");
+    }
     // 记录当前版本指针，语义对齐 git HEAD
     writeFileSync(join(dir, "HEAD"), `v${meta.version}`);
 
@@ -47,6 +52,13 @@ export class DeliverableStore {
   read(deliverableId: string, version: number, extension: string): Buffer {
     const path = join(this.baseDir, deliverableId, `v${version}.${extension}`);
     return readFileSync(path);
+  }
+
+  /** 读取指定版本的源 Markdown（版本 diff 与修订的工作基础） */
+  readSource(deliverableId: string, version: number): string | null {
+    const path = join(this.baseDir, deliverableId, `v${version}.source.md`);
+    if (!existsSync(path)) return null;
+    return readFileSync(path, "utf-8");
   }
 
   /** 读取当前（HEAD）版本 */

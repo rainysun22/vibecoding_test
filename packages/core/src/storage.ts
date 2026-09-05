@@ -40,6 +40,7 @@ export class Storage {
         goal TEXT NOT NULL,
         status TEXT NOT NULL,
         skill_id TEXT,
+        revision_of TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         completed_at TEXT,
@@ -132,6 +133,15 @@ export class Storage {
         updated_at TEXT NOT NULL
       );
     `);
+    this.addColumnIfMissing("tasks", "revision_of", "TEXT");
+  }
+
+  /** 轻量列迁移：老库升级不丢数据 */
+  private addColumnIfMissing(table: string, column: string, ddl: string): void {
+    const columns = this.all<{ name: string }>(`PRAGMA table_info(${table})`);
+    if (!columns.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${ddl}`);
+    }
   }
 
   /* ------------------------------ Usage ------------------------------ */
@@ -210,14 +220,15 @@ export class Storage {
   createTask(task: Task): void {
     this.db
       .prepare(
-        `INSERT INTO tasks (id, goal, status, skill_id, created_at, updated_at, prompt_tokens, completion_tokens, total_tokens, cost_usd)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO tasks (id, goal, status, skill_id, revision_of, created_at, updated_at, prompt_tokens, completion_tokens, total_tokens, cost_usd)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         task.id,
         task.goal,
         task.status,
         task.skillId ?? null,
+        task.revisionOf ? JSON.stringify(task.revisionOf) : null,
         task.createdAt,
         task.updatedAt,
         task.usage.promptTokens,
@@ -488,18 +499,27 @@ export class Storage {
 /* ------------------------------ Row 映射 ------------------------------ */
 
 interface TaskRow {
-  id: string; goal: string; status: string; skill_id: string | null;
+  id: string; goal: string; status: string; skill_id: string | null; revision_of: string | null;
   created_at: string; updated_at: string; completed_at: string | null; error: string | null;
   run_state: string | null; prompt_tokens: number; completion_tokens: number;
   total_tokens: number; cost_usd: number;
 }
 
 function toTask(row: TaskRow): Task & { runState: unknown } {
+  let revisionOf: Task["revisionOf"];
+  if (row.revision_of) {
+    try {
+      revisionOf = JSON.parse(row.revision_of) as NonNullable<Task["revisionOf"]>;
+    } catch {
+      // 损坏的修订信息按无修订处理
+    }
+  }
   return {
     id: row.id,
     goal: row.goal,
     status: row.status as Task["status"],
     skillId: row.skill_id ?? undefined,
+    revisionOf,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at ?? undefined,

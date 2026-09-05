@@ -17,6 +17,7 @@ import type { GenerateInput, GenerateOutput } from "@openwork/deliverables";
 import { Storage } from "./storage.js";
 import { DeliverableStore } from "./deliverable-store.js";
 import type { EventBus } from "./events.js";
+import { gatherSources, renderSourcesForPrompt } from "./tools.js";
 
 /**
  * Agent 运行核心 —— plan → act → verify 循环。
@@ -63,6 +64,9 @@ export interface AgentOptions {
 }
 
 export class AgentRunner {
+  /** 运行中任务锁：同一任务不并发执行（断点续跑/手动恢复的安全性基础） */
+  private readonly active = new Set<string>();
+
   constructor(
     private readonly storage: Storage,
     private readonly store: DeliverableStore,
@@ -73,12 +77,23 @@ export class AgentRunner {
 
   /* ------------------------------ 主循环 ------------------------------ */
 
-  /** 运行任务直至完成或被审批阻塞 */
+  /** 运行任务直至完成或被审批阻塞（并发调用同一任务会被锁挡回） */
   async run(taskId: string): Promise<void> {
+    if (this.active.has(taskId)) return;
     const task = this.storage.getTask(taskId);
     if (!task) return;
     if (["completed", "failed", "cancelled", "awaiting_approval"].includes(task.status)) return;
 
+    this.active.add(taskId);
+    try {
+      await this.runLocked(task);
+    } finally {
+      this.active.delete(taskId);
+    }
+  }
+
+  private async runLocked(task: Task & { runState: unknown }): Promise<void> {
+    const taskId = task.id;
     const state = (task.runState as RunState | null) ?? emptyState();
 
     try {
@@ -112,32 +127,39 @@ export class AgentRunner {
     this.storage.updateTask(task.id, { status: "planning" });
     this.emitEvent(task.id, "task.planning", "正在拆解委托目标");
 
-    const skill = task.skillId ? this.lookupSkill?.(task.skillId) : undefined;
-    const skillSection = skill
-      ? `技能约束：${skill.name} —— ${skill.description}\n期望产出格式：${skill.outputFormat}${skill.planHints ? `\n计划提示：${skill.planHints}` : ""}`
-      : "";
-
-    // 计划缓存：相似目标直接复用历史计划（省一次强模型调用，v0.2 成本优化）
-    const cacheKey = planCacheKey(task.goal, task.skillId);
-    const cached = this.storage.getPlanCache(cacheKey);
-
     let plan: Plan;
-    if (cached) {
-      plan = parsePlan(cached.planJson, task.id); // 复用解析器：重置步骤状态并兜底校验
+    let cached: { planJson: string; hits: number } | null = null;
+
+    if (task.revisionOf) {
+      // 修订委托：结构确定（改稿 → 交付新版本），无需 LLM 拆解
+      plan = revisionPlan(task);
     } else {
-      const planJson = await this.llm(
-        task.id,
-        "PLANNER",
-        [
-          {
-            role: "user",
-            content: `委托目标：${task.goal}\n${skillSection}\n请生成执行计划。`,
-          },
-        ],
-        "planning",
-      );
-      plan = parsePlan(planJson, task.id);
-      this.storage.putPlanCache(cacheKey, JSON.stringify(plan));
+      const skill = task.skillId ? this.lookupSkill?.(task.skillId) : undefined;
+      const skillSection = skill
+        ? `技能约束：${skill.name} —— ${skill.description}\n期望产出格式：${skill.outputFormat}${skill.planHints ? `\n计划提示：${skill.planHints}` : ""}`
+        : "";
+
+      // 计划缓存：相似目标直接复用历史计划（省一次强模型调用，v0.2 成本优化）
+      const cacheKey = planCacheKey(task.goal, task.skillId);
+      cached = this.storage.getPlanCache(cacheKey);
+
+      if (cached) {
+        plan = parsePlan(cached.planJson, task.id); // 复用解析器：重置步骤状态并兜底校验
+      } else {
+        const planJson = await this.llm(
+          task.id,
+          "PLANNER",
+          [
+            {
+              role: "user",
+              content: `委托目标：${task.goal}\n${skillSection}\n请生成执行计划。`,
+            },
+          ],
+          "planning",
+        );
+        plan = parsePlan(planJson, task.id);
+        this.storage.putPlanCache(cacheKey, JSON.stringify(plan));
+      }
     }
 
     state.plan = plan;
@@ -147,7 +169,9 @@ export class AgentRunner {
       "plan.ready",
       cached
         ? `计划就绪（缓存命中 ×${cached.hits}）：${plan.steps.length} 个步骤`
-        : `计划就绪：${plan.steps.length} 个步骤`,
+        : task.revisionOf
+          ? `修订计划就绪：${plan.steps.length} 个步骤`
+          : `计划就绪：${plan.steps.length} 个步骤`,
       plan.steps.map((s, i) => `${i + 1}. ${s.title}`).join("\n"),
     );
 
@@ -233,13 +257,23 @@ export class AgentRunner {
   private async executeStep(task: Task, step: PlanStep, state: RunState): Promise<string> {
     switch (step.kind) {
       case "research": {
+        // 工具系统：从目标与已审批指令中提取显式 URL/文件路径，作为真实数据源（v0.3）
+        const sources = await this.collectSources(task, step);
+
         return this.llm(
           task.id,
           "RESEARCHER",
           [
             {
               role: "user",
-              content: `委托目标：${task.goal}\n任务：${step.instruction}\n请输出要点式研究笔记（Markdown）。`,
+              content: [
+                `委托目标：${task.goal}`,
+                `任务：${step.instruction}`,
+                sources ? `参考资料（来自用户指定的真实来源）：\n${sources}` : "",
+                "请输出要点式研究笔记（Markdown）。",
+              ]
+                .filter(Boolean)
+                .join("\n\n"),
             },
           ],
           "execution",
@@ -253,6 +287,18 @@ export class AgentRunner {
           .map((entry) => entry.result)
           .join("\n\n");
 
+        // 修订委托：注入原版本正文 + 修订反馈
+        let revisionSection = "";
+        if (task.revisionOf) {
+          const original = this.readOriginalSource(task.revisionOf.deliverableId);
+          if (original) {
+            revisionSection = [
+              `原成果正文（待修订）：\n${original.content.slice(0, 12_000)}`,
+              `修订反馈（必须逐条落实）：${task.revisionOf.feedback}`,
+            ].join("\n\n");
+          }
+        }
+
         const content = await this.llm(
           task.id,
           "WRITER",
@@ -262,6 +308,7 @@ export class AgentRunner {
               content: [
                 `委托目标：${task.goal}`,
                 researchNotes ? `研究笔记：\n${researchNotes}` : "",
+                revisionSection,
                 `任务：${step.instruction}`,
                 "请直接输出正文（Markdown，不要输出计划说明）。",
               ]
@@ -278,6 +325,14 @@ export class AgentRunner {
       case "deliver": {
         const draft = state.draft;
         if (!draft) throw new Error("交付步骤缺少正文草稿");
+
+        // 修订委托：在既有成果上追加新版本（成果 git 化闭环）
+        if (task.revisionOf) {
+          const meta = await this.reviseExistingDeliverable(task, draft);
+          state.deliverableId = meta.id;
+          return `已生成新版本 v${meta.version}：「${meta.title}」`;
+        }
+
         const format = step.outputFormat ?? "markdown";
         const skill = task.skillId ? this.lookupSkill?.(task.skillId) : undefined;
         const finalFormat = skill?.outputFormat ?? format;
@@ -293,6 +348,63 @@ export class AgentRunner {
         return `已生成 ${finalFormat} 成果「${title}」`;
       }
     }
+  }
+
+  /**
+   * 汇集研究数据源并记录工具事件（审计轨迹）。
+   * 单个来源失败不阻断步骤 —— 记 tool.failed 事件后继续。
+   */
+  private async collectSources(task: Task, step: PlanStep): Promise<string> {
+    let materials: Awaited<ReturnType<typeof gatherSources>>["materials"] = [];
+    let failures: Awaited<ReturnType<typeof gatherSources>>["failures"] = [];
+    try {
+      const gathered = await gatherSources(task.goal, step.instruction);
+      materials = gathered.materials;
+      failures = gathered.failures;
+    } catch {
+      // 工具整体异常不影响研究步骤，仅无外部材料
+    }
+
+    for (const material of materials) {
+      this.emitEvent(
+        task.id,
+        "tool.executed",
+        `工具执行：${material.kind === "web" ? "抓取网页" : "读取本地文件"}`,
+        `${material.source}（${material.content.length} 字符）`,
+      );
+    }
+    for (const failure of failures) {
+      this.emitEvent(task.id, "tool.failed", `工具失败：${failure.source}`, failure.error);
+    }
+    return renderSourcesForPrompt(materials);
+  }
+
+  /** 读取原版本源 Markdown（修订任务的上下文基础） */
+  private readOriginalSource(deliverableId: string): { content: string } | null {
+    const meta = this.storage.getDeliverable(deliverableId);
+    if (!meta) return null;
+    const source = this.store.readSource(deliverableId, meta.version);
+    return source ? { content: source } : null;
+  }
+
+  /** 修订交付：为既有成果追加新版本（版本链延续） */
+  private async reviseExistingDeliverable(task: Task, draft: string): Promise<DeliverableMeta> {
+    const revision = task.revisionOf!;
+    const meta = this.storage.getDeliverable(revision.deliverableId);
+    if (!meta) throw new Error("修订目标成果不存在");
+
+    const nextVersion = meta.version + 1;
+    const updated: DeliverableMeta = { ...meta, version: nextVersion, updatedAt: new Date().toISOString() };
+    const output = await this.generateFile({ title: meta.title, markdown: draft, format: meta.format });
+    const version = this.store.save(updated, output, revision.feedback, draft);
+    this.storage.addVersion(meta.id, version);
+    this.emitEvent(
+      task.id,
+      "deliverable.versioned",
+      `成果新版本：v${nextVersion}（${meta.title}）`,
+      `修订依据：${revision.feedback.slice(0, 200)}`,
+    );
+    return updated;
   }
 
   /* ------------------------------ 阶段：校验 ------------------------------ */
@@ -407,7 +519,7 @@ export class AgentRunner {
     };
 
     const output = await this.generateFile({ title, markdown, format });
-    const version = this.store.save(meta, output, note);
+    const version = this.store.save(meta, output, note, markdown);
     this.storage.createDeliverable(meta, version);
     return meta;
   }
@@ -615,6 +727,34 @@ function systemPrompt(marker: string): string {
 }
 
 /* ------------------------------ 工具函数 ------------------------------ */
+
+/** 修订委托的确定性计划：改稿 → 交付新版本（无 LLM 参与，结构天然可信） */
+function revisionPlan(task: Task): Plan {
+  const feedback = task.revisionOf!.feedback;
+  return {
+    taskId: task.id,
+    summary: `修订成果：${feedback.slice(0, 120)}`,
+    steps: [
+      {
+        id: "step-1",
+        kind: "draft",
+        title: "根据反馈修订正文",
+        instruction: `基于修订反馈逐条改进原成果正文，保留未涉及的部分：${feedback}`,
+        status: "pending",
+        outputFormat: undefined,
+      },
+      {
+        id: "step-2",
+        kind: "deliver",
+        title: "交付新版本",
+        instruction: "将修订后正文生成为既有成果的新版本",
+        status: "pending",
+        outputFormat: undefined,
+      },
+    ],
+    createdAt: new Date().toISOString(),
+  };
+}
 
 /** 计划缓存键：目标归一化（大小写/空白）+ 技能约束 一起哈希 */
 function planCacheKey(goal: string, skillId?: string): string {

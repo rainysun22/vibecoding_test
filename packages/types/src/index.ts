@@ -120,7 +120,11 @@ export type TaskEventType =
   | "step.started"
   | "step.completed"
   | "step.failed"
+  | "tool.executed"
+  | "tool.failed"
   | "deliverable.created"
+  | "deliverable.versioned"
+  | "task.resumed"
   | "task.verifying"
   | "task.completed"
   | "task.failed"
@@ -133,6 +137,11 @@ export interface Task {
   goal: string;
   status: TaskStatus;
   skillId?: string;
+  /** 修订委托：基于既有成果 + 反馈生成新版本（成果 git 化闭环） */
+  revisionOf?: {
+    deliverableId: string;
+    feedback: string;
+  };
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -210,6 +219,37 @@ export interface DeliverableVersion {
   taskId: string;
   note?: string;
   createdAt: string;
+}
+
+/* ============================== Deliverable Diff ============================== */
+
+/** 结构化 diff 行（统一视图：上下文行 + 新增行 + 删除行） */
+export interface DiffLine {
+  type: "ctx" | "add" | "del";
+  text: string;
+  /** 旧版本行号（del/ctx 行有值） */
+  oldNo?: number;
+  /** 新版本行号（add/ctx 行有值） */
+  newNo?: number;
+}
+
+/** 两个版本间的结构化对比（git 化体验） */
+export interface DeliverableDiff {
+  deliverableId: string;
+  from: number;
+  to: number;
+  /** 行级 diff（基于版本源 Markdown，与导出格式无关） */
+  lines: DiffLine[];
+  stat: { added: number; removed: number; unchanged: number };
+}
+
+/* ============================== Tools ============================== */
+
+/** 研究数据源材料（网页抓取 / 本地文件读取的产物） */
+export interface SourceMaterial {
+  kind: "web" | "file";
+  source: string;
+  content: string;
 }
 
 /* ============================== Skills ============================== */

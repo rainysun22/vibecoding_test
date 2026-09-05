@@ -174,6 +174,33 @@ export function App() {
     [refreshTasks, refreshGlobal, refreshTaskDetail, showToast],
   );
 
+  /** 断点续跑（v0.3）：恢复中断任务并跟踪 */
+  const handleResume = useCallback(
+    async (taskId: string) => {
+      try {
+        await api.resumeTask(taskId);
+        setSelectedId(taskId);
+        showToast("已发起续跑 —— 从中断处恢复执行");
+        void refreshTasks();
+      } catch (error) {
+        showToast(error instanceof Error ? error.message : "续跑失败");
+      }
+    },
+    [refreshTasks, showToast],
+  );
+
+  /** 修订任务创建后选中并跟踪 */
+  const handleRevisionCreated = useCallback(
+    (task: Task) => {
+      setSelectedId(task.id);
+      setEvents([]);
+      setTaskDeliverables([]);
+      setStreams([]);
+      void refreshTasks();
+    },
+    [refreshTasks],
+  );
+
   const selectedTask = useMemo(
     () => tasks.find((t) => t.id === selectedId) ?? null,
     [tasks, selectedId],
@@ -217,6 +244,7 @@ export function App() {
             selectedId={selectedId}
             onSelect={setSelectedId}
             pendingCount={checkpoints.length}
+            onResume={handleResume}
           />
         </section>
 
@@ -249,6 +277,7 @@ export function App() {
             deliverables={selectedId ? taskDeliverables : allDeliverables}
             scoped={Boolean(selectedId)}
             onToast={showToast}
+            onTaskCreated={handleRevisionCreated}
           />
         </section>
       </main>

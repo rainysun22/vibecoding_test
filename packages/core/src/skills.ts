@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { SkillDefinition } from "@openwork/types";
@@ -32,6 +32,27 @@ export class SkillRegistry {
         // 单个技能解析失败不影响整体
       }
     }
+  }
+
+  /**
+   * 安装技能：校验 YAML → 落盘用户技能目录 → 注册生效（热加载）。
+   * 技能市场的最小实现：任何能给出合法 YAML 的 URL 都是技能源。
+   */
+  install(content: string, userDir: string): SkillDefinition {
+    const parsed = parseYaml(content) as Partial<SkillDefinition>;
+    if (!parsed.id || !parsed.name || !parsed.description || !parsed.outputFormat) {
+      throw new Error("技能定义不完整：需要 id / name / description / outputFormat");
+    }
+    const validFormats = new Set(["markdown", "html", "docx", "xlsx", "pptx"]);
+    if (!validFormats.has(parsed.outputFormat)) {
+      throw new Error(`outputFormat 非法：${String(parsed.outputFormat)}`);
+    }
+
+    mkdirSync(userDir, { recursive: true });
+    writeFileSync(join(userDir, `${parsed.id}.yml`), content, "utf-8");
+    const definition = { ...parsed, builtin: false } as SkillDefinition;
+    this.skills.set(definition.id, definition);
+    return definition;
   }
 
   list(): SkillDefinition[] {
