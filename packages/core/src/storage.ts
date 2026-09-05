@@ -132,8 +132,19 @@ export class Storage {
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS knowledge_docs (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        size_chars INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      );
     `);
     this.addColumnIfMissing("tasks", "revision_of", "TEXT");
+    this.addColumnIfMissing("tasks", "parent_task_id", "TEXT");
+    this.addColumnIfMissing("tasks", "batch_index", "INTEGER");
+    this.addColumnIfMissing("tasks", "parallel_groups", "TEXT");
   }
 
   /** 轻量列迁移：老库升级不丢数据 */

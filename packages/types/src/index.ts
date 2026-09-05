@@ -129,7 +129,13 @@ export type TaskEventType =
   | "task.completed"
   | "task.failed"
   | "task.cancelled"
-  | "usage.recorded";
+  | "usage.recorded"
+  /* v0.4：知识库 / 画像 / 引用 / 并行委托 */
+  | "knowledge.recalled"
+  | "subtask.spawned"
+  | "subtask.completed"
+  | "task.synthesizing"
+  | "sources.cited";
 
 /** 一句话委托 */
 export interface Task {
@@ -142,6 +148,12 @@ export interface Task {
     deliverableId: string;
     feedback: string;
   };
+  /** 并行委托：父任务 ID（子任务由父任务派生，独立运行后聚合） */
+  parentTaskId?: string;
+  /** 并行批次内的序号（1 起，用于稳定排序） */
+  batchIndex?: number;
+  /** 并行父任务的子目标清单（确定性 fork 计划的依据） */
+  parallelGroups?: string[];
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
@@ -151,8 +163,8 @@ export interface Task {
 
 /* ============================== Plan ============================== */
 
-/** 计划步骤类型 */
-export type PlanStepKind = "research" | "draft" | "deliver";
+/** 计划步骤类型（synthesize：并行子成果聚合，仅 fork-join 计划使用） */
+export type PlanStepKind = "research" | "draft" | "deliver" | "synthesize";
 
 /** Agent 生成的执行计划 */
 export interface PlanStep {
@@ -250,6 +262,40 @@ export interface SourceMaterial {
   kind: "web" | "file";
   source: string;
   content: string;
+}
+
+/* ============================== Knowledge Base ============================== */
+
+/** 个人知识库文档（本地优先：内容永不出本机，Agent 按相关性召回注入） */
+export interface KnowledgeDoc {
+  id: string;
+  title: string;
+  /** 内容字符数（列表展示，避免整表回传） */
+  sizeChars: number;
+  createdAt: string;
+}
+
+/** 知识召回结果（带分数与片段，供审计展示） */
+export interface KnowledgeRecall {
+  docId: string;
+  title: string;
+  /** bigram 重叠得分（0-1，越高越相关） */
+  score: number;
+  /** 命中片段（命中位置附近的窗口） */
+  snippet: string;
+}
+
+/* ============================== User Profile ============================== */
+
+/** 用户画像（Claude Cowork 式"入职培训"：一次填写，每次委托自动生效） */
+export interface UserProfile {
+  /** 我是谁：身份 / 业务背景 / 所在行业 */
+  about?: string;
+  /** 工作偏好：流程 / 结构 / 重点取舍 */
+  preferences?: string;
+  /** 表达风格：语气 / 受众 / 文风 */
+  voice?: string;
+  updatedAt?: string;
 }
 
 /* ============================== Skills ============================== */
