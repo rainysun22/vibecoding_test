@@ -101,6 +101,39 @@ function extractGoal(text: string): string {
 }
 
 function mockPlan(goal: string): string {
+  // 对比类目标 → 双研究步骤（两侧并行调研），用于演示/验证 research 并行执行
+  if (/对比|比较|versus|\bvs\.?\b/i.test(goal)) {
+    return JSON.stringify(
+      {
+        summary: `围绕「${goal}」的双侧调研-对比撰写-交付计划`,
+        steps: [
+          {
+            kind: "research",
+            title: "调研甲方主题",
+            instruction: `围绕「${goal}」中的第一个对象收集要点：定位、优势、风险。`,
+          },
+          {
+            kind: "research",
+            title: "调研乙方主题",
+            instruction: `围绕「${goal}」中的第二个对象收集要点：定位、优势、风险。`,
+          },
+          {
+            kind: "draft",
+            title: "撰写对比正文",
+            instruction: `基于两侧研究笔记，围绕「${goal}」撰写结构完整的对比分析正文。使用 Markdown。`,
+          },
+          {
+            kind: "deliver",
+            title: "生成最终成果文件",
+            instruction: `将正文整理为最终交付成果，标题聚焦「${goal}」。`,
+          },
+        ],
+      },
+      null,
+      2,
+    );
+  }
+
   return JSON.stringify(
     {
       summary: `围绕「${goal}」生成结构化成果物的研究-撰写-交付计划`,

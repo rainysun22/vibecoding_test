@@ -161,6 +161,26 @@ export function setDefaultModels(
   });
 }
 
+/* ------------------------------ 成本路由 ------------------------------ */
+
+/** 路由策略（与 @openwork/llm-gateway 的 RoutingConfig 保持结构一致） */
+export interface RoutingConfig {
+  preferLocal: boolean;
+  localModel: string | null;
+  dailyBudgetUSD: number;
+}
+
+export function getRouting(): Promise<RoutingConfig> {
+  return request("/api/models/routing");
+}
+
+export function setRouting(patch: Partial<RoutingConfig>): Promise<RoutingConfig> {
+  return request("/api/models/routing", {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+}
+
 /* ------------------------------ 统计 ------------------------------ */
 
 export function usageStats(): Promise<UsageSummary> {
@@ -175,6 +195,10 @@ export interface LiveEvent {
   title?: string;
   detail?: string;
   at: string;
+  /** 流式增量（type === "step.streaming"）：同 streamId 的 delta 按序拼接 */
+  streamId?: string;
+  delta?: string;
+  streamDone?: boolean;
 }
 
 /** 订阅全局实时事件流；返回退订函数 */

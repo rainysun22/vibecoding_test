@@ -62,14 +62,21 @@ function ModelsTab({ onToast }: { onToast: (message: string) => void }) {
   const [defaultModel, setDefaultModel] = useState("mock/mock-agent");
   const [plannerModel, setPlannerModel] = useState("mock/mock-agent");
   const [drafts, setDrafts] = useState<Record<string, { apiKey: string; baseUrl: string }>>({});
+  const [preferLocal, setPreferLocal] = useState(false);
+  const [localModel, setLocalModel] = useState("");
+  const [dailyBudgetUSD, setDailyBudgetUSD] = useState("0");
 
   const load = useCallback(async () => {
-    const [providerList, modelList] = await Promise.all([
+    const [providerList, modelList, routing] = await Promise.all([
       api.listProviders(),
       api.listModels(),
+      api.getRouting(),
     ]);
     setProviders(providerList);
     setModels(modelList);
+    setPreferLocal(routing.preferLocal);
+    setLocalModel(routing.localModel ?? "");
+    setDailyBudgetUSD(String(routing.dailyBudgetUSD));
     const current = modelList.find((m) => m.id === "mock/mock-agent");
     if (current) {
       setDefaultModel(current.id);
@@ -106,6 +113,19 @@ function ModelsTab({ onToast }: { onToast: (message: string) => void }) {
     }
   };
 
+  const saveRouting = async () => {
+    try {
+      await api.setRouting({
+        preferLocal,
+        localModel: localModel || null,
+        dailyBudgetUSD: Number(dailyBudgetUSD) || 0,
+      });
+      onToast("成本策略已更新");
+    } catch {
+      onToast("保存失败");
+    }
+  };
+
   return (
     <div className="settings-sections">
       <section>
@@ -134,6 +154,49 @@ function ModelsTab({ onToast }: { onToast: (message: string) => void }) {
           </label>
           <button className="btn primary" onClick={() => void saveModels()}>
             保存路由
+          </button>
+        </div>
+      </section>
+
+      <section>
+        <h3>本地优先与预算</h3>
+        <p className="hint">
+          本地模型承担执行类调用（边际成本归零）；预算超限后自动降级到最便宜的已配置模型
+        </p>
+        <div className="routing-form">
+          <label className="check-row">
+            <input
+              type="checkbox"
+              checked={preferLocal}
+              onChange={(e) => setPreferLocal(e.target.checked)}
+            />
+            <span>本地模型优先（需已配置 Ollama）</span>
+          </label>
+          <label>
+            <span>本地执行模型</span>
+            <select value={localModel} onChange={(e) => setLocalModel(e.target.value)}>
+              <option value="">未选择</option>
+              {models
+                .filter((m) => m.tier === "local")
+                .map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+            </select>
+          </label>
+          <label>
+            <span>每日预算上限（USD，0 = 不限）</span>
+            <input
+              type="number"
+              min={0}
+              step="0.5"
+              value={dailyBudgetUSD}
+              onChange={(e) => setDailyBudgetUSD(e.target.value)}
+            />
+          </label>
+          <button className="btn primary" onClick={() => void saveRouting()}>
+            保存策略
           </button>
         </div>
       </section>

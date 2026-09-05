@@ -18,6 +18,12 @@ export interface RuntimeEventPayload {
   detail?: string;
   at: string;
   usage?: UsageRecord;
+  /** 流式增量上下文：同一 streamId 的 delta 按序拼接即为完整输出（仅广播，不落库） */
+  streamId?: string;
+  /** 流式增量文本 */
+  delta?: string;
+  /** 流结束标记（最终帧） */
+  streamDone?: boolean;
 }
 
 export class EventBus extends EventEmitter {

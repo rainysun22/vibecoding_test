@@ -186,6 +186,21 @@ export async function registerRoutes(app: FastifyInstance, runtime: OpenWorkRunt
     },
   );
 
+  /* ------------------------------ 成本路由 ------------------------------ */
+
+  app.get("/api/models/routing", async () => runtime.getRouting());
+
+  app.put<{
+    Body: { preferLocal?: boolean; localModel?: string | null; dailyBudgetUSD?: number };
+  }>("/api/models/routing", async (request) => {
+    const { preferLocal, localModel, dailyBudgetUSD } = request.body ?? {};
+    return runtime.setRouting({
+      ...(preferLocal !== undefined ? { preferLocal: Boolean(preferLocal) } : {}),
+      ...(localModel !== undefined ? { localModel: localModel || null } : {}),
+      ...(dailyBudgetUSD !== undefined ? { dailyBudgetUSD: Math.max(0, Number(dailyBudgetUSD) || 0) } : {}),
+    });
+  });
+
   /* ------------------------------ 统计 ------------------------------ */
 
   app.get("/api/stats", async () => runtime.usageSummary());

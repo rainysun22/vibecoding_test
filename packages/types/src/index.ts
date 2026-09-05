@@ -251,6 +251,8 @@ export interface UsageSummary {
   totalTasks: number;
   totalTokens: number;
   totalCostUSD: number;
+  /** 今日累计成本（预算控制依据；按服务器本地日期结算） */
+  todayCostUSD?: number;
   byProvider: Record<string, { tokens: number; costUSD: number; calls: number }>;
 }
 

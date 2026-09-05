@@ -19,6 +19,32 @@ export interface GatewayOptions {
   defaultModel?: string;
   /** 计划/旗舰任务使用的模型（缺省用 defaultModel） */
   plannerModel?: string;
+  /** 成本路由策略（v0.2：本地优先 + 预算降级） */
+  routing?: Partial<RoutingConfig>;
+}
+
+/** 成本路由策略 —— v0.2 运行成本优化的核心配置 */
+export interface RoutingConfig {
+  /** 本地模型优先：Ollama 可用时，execution 类调用自动走本地（边际成本归零） */
+  preferLocal: boolean;
+  /** 首选本地模型 ID（如 "ollama/qwen3:8b"） */
+  localModel: string | null;
+  /** 每日预算上限（USD）。0 = 不限额；超限后自动降级到最便宜可用模型 */
+  dailyBudgetUSD: number;
+}
+
+/** 预算超限且无可用免费模型时抛出 */
+export class BudgetExceededError extends Error {
+  constructor(
+    readonly spentUSD: number,
+    readonly budgetUSD: number,
+  ) {
+    super(
+      `今日预算超限：已消费 $${spentUSD.toFixed(4)} / 上限 $${budgetUSD.toFixed(2)}。` +
+        " 请提高预算、启用本地模型，或明日再试。",
+    );
+    this.name = "BudgetExceededError";
+  }
 }
 
 /**
@@ -37,9 +63,20 @@ export class LLMGateway {
   defaultModel: string;
   plannerModel: string;
 
+  /** 成本路由策略 */
+  routing: RoutingConfig = {
+    preferLocal: false,
+    localModel: null,
+    dailyBudgetUSD: 0,
+  };
+
+  /** 今日已消费（USD）—— 进程内累计 + 启动时从持久化台账恢复 */
+  private spentToday = { date: localDateKey(), usd: 0 };
+
   constructor(options: GatewayOptions = {}) {
     this.defaultModel = options.defaultModel ?? "mock/mock-agent";
     this.plannerModel = options.plannerModel ?? this.defaultModel;
+    this.routing = { ...this.routing, ...options.routing };
     this.registerBuiltins();
   }
 
@@ -145,9 +182,59 @@ export class LLMGateway {
     if (finalUsage) this.recordUsage(request.model, finalUsage);
   }
 
-  /** 按任务性质选择模型：planning/verifying 用 planner 模型，执行用默认模型 */
+  /** 按任务性质选择模型：planning/verifying 用 planner 模型；execution 走成本路由 */
   modelForPurpose(purpose: "planning" | "verifying" | "execution"): string {
-    return purpose === "execution" ? this.defaultModel : this.plannerModel;
+    if (purpose !== "execution") return this.plannerModel;
+
+    // 1. 本地优先：Ollama 已配置时，执行类调用边际成本归零
+    if (
+      this.routing.preferLocal &&
+      this.routing.localModel &&
+      this.providers.has("ollama")
+    ) {
+      return this.routing.localModel;
+    }
+
+    // 2. 预算降级：超限后自动切换到最便宜的可用付费模型
+    const budget = this.routing.dailyBudgetUSD;
+    if (budget > 0 && this.todaySpentUSD() >= budget) {
+      const cheapest = this.cheapestPaidModel();
+      if (!cheapest) throw new BudgetExceededError(this.todaySpentUSD(), budget);
+      return cheapest;
+    }
+
+    return this.defaultModel;
+  }
+
+  /** 更新路由策略（服务层负责持久化） */
+  setRouting(patch: Partial<RoutingConfig>): RoutingConfig {
+    this.routing = { ...this.routing, ...patch };
+    return this.routing;
+  }
+
+  /** 启动时恢复当日累计消费（来自持久化 usage 台账） */
+  restoreSpentToday(usd: number): void {
+    this.spentToday = { date: localDateKey(), usd: Math.max(0, usd) };
+  }
+
+  /** 今日已消费（USD） */
+  todaySpentUSD(): number {
+    if (this.spentToday.date !== localDateKey()) this.spentToday = { date: localDateKey(), usd: 0 };
+    return this.spentToday.usd;
+  }
+
+  /** 最便宜的已配置付费模型（排除 mock：mock 是演示兜底而非成本降级目标） */
+  private cheapestPaidModel(): string | null {
+    const candidates = this.availableModels().filter((m) => {
+      if (m.provider === "mock") return false;
+      const config = this.configs.get(m.provider);
+      return config?.connected ?? m.provider === "ollama";
+    });
+    if (candidates.length === 0) return null;
+    const blended = (m: (typeof candidates)[number]) =>
+      (m.inputPricePerMTok + m.outputPricePerMTok) / 2;
+    candidates.sort((a, b) => blended(a) - blended(b));
+    return candidates[0]!.id;
   }
 
   private resolveProvider(modelId: string): LLMProvider {
@@ -163,6 +250,9 @@ export class LLMGateway {
   private recordUsage(model: string, usage: CompletionResponse["usage"]): void {
     this.callLog.push({ model, usage, at: new Date().toISOString() });
     if (this.callLog.length > 10_000) this.callLog.splice(0, this.callLog.length - 10_000);
+    // 当日预算累计（免费模型成本为 0，不影响）
+    if (this.spentToday.date !== localDateKey()) this.spentToday = { date: localDateKey(), usd: 0 };
+    this.spentToday.usd += usage.costUSD;
   }
 
   /** 导出会话内用量台账（服务层负责持久化） */
@@ -175,6 +265,13 @@ export class LLMGateway {
   describeModel(modelId: string): ModelInfo | undefined {
     return findModel(modelId);
   }
+}
+
+/** 本地日期键（YYYY-MM-DD）：预算按本地日历日结算 */
+function localDateKey(): string {
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
 }
 
 function providerLabel(id: ProviderId): string {

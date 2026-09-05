@@ -8,6 +8,13 @@ import { DeliverablesPanel } from "./components/DeliverablesPanel";
 import { ApprovalCard } from "./components/ApprovalCard";
 import { SettingsModal } from "./components/SettingsModal";
 
+/** 活动流中的实时流式输出（v0.2：LLM 增量直达前端） */
+interface LiveStream {
+  streamId: string;
+  text: string;
+  done: boolean;
+}
+
 /**
  * OpenWork 工作台主布局：
  * 左栏（委托 + 任务）· 中栏（活动流）· 右栏（审批 + 成果）
@@ -25,6 +32,7 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionAlive, setConnectionAlive] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [streams, setStreams] = useState<LiveStream[]>([]);
 
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
@@ -81,8 +89,9 @@ export function App() {
     })();
   }, [refreshGlobal]);
 
-  /* 选中任务变化时拉取详情 */
+  /* 选中任务变化时拉取详情（并清空上一个任务的流式缓冲） */
   useEffect(() => {
+    setStreams([]);
     if (selectedId) void refreshTaskDetail(selectedId);
     else {
       setEvents([]);
@@ -90,10 +99,44 @@ export function App() {
     }
   }, [selectedId, refreshTaskDetail]);
 
-  /* SSE 实时驱动所有刷新 */
+  /* SSE 实时驱动所有刷新；流式增量本地累积（高频，不触发网络刷新） */
   useEffect(() => {
     const unsubscribe = api.subscribeEvents((event) => {
       setConnectionAlive(true);
+
+      // 流式增量：仅本地拼接渲染，避免高频刷新风暴
+      if (event.type === "step.streaming" && event.taskId === selectedIdRef.current) {
+        const streamId = event.streamId ?? "unknown";
+        setStreams((current) => {
+          const existing = current.find((s) => s.streamId === streamId);
+          if (!existing) {
+            return [
+              ...current,
+              { streamId, text: event.delta ?? "", done: Boolean(event.streamDone) },
+            ];
+          }
+          return current.map((s) =>
+            s.streamId === streamId
+              ? {
+                  ...s,
+                  text: s.text + (event.delta ?? ""),
+                  done: s.done || Boolean(event.streamDone),
+                }
+              : s,
+          );
+        });
+        return;
+      }
+
+      if (
+        (event.type === "task.completed" ||
+          event.type === "task.failed" ||
+          event.type === "task.cancelled") &&
+        event.taskId === selectedIdRef.current
+      ) {
+        setStreams([]);
+      }
+
       if (event.taskId === selectedIdRef.current) {
         void refreshTaskDetail(event.taskId);
       }
@@ -109,6 +152,7 @@ export function App() {
       setSelectedId(task.id);
       setEvents([]);
       setTaskDeliverables([]);
+      setStreams([]);
       void refreshTasks();
       void refreshGlobal();
     },
@@ -155,6 +199,9 @@ export function App() {
             <span title="累计任务">📋 {stats.totalTasks}</span>
             <span title="累计 tokens">🔤 {stats.totalTokens.toLocaleString()}</span>
             <span title="累计成本（Mock 免费）">💰 ${stats.totalCostUSD.toFixed(4)}</span>
+            {stats.todayCostUSD !== undefined && stats.todayCostUSD > 0 && (
+              <span title="今日消费（预算控制）">📅 ${stats.todayCostUSD.toFixed(4)}</span>
+            )}
           </div>
         )}
         <button className="btn ghost" onClick={() => setSettingsOpen(true)}>
@@ -174,7 +221,12 @@ export function App() {
         </section>
 
         <section className="panel column-center">
-          <ActivityStream task={selectedTask} events={events} connected={connectionAlive} />
+          <ActivityStream
+            task={selectedTask}
+            events={events}
+            connected={connectionAlive}
+            streams={streams}
+          />
         </section>
 
         <section className="panel column-right">

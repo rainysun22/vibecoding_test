@@ -123,6 +123,14 @@ export class Storage {
         task_id TEXT,
         created_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS plan_cache (
+        goal_hash TEXT PRIMARY KEY,
+        plan_json TEXT NOT NULL,
+        hits INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
   }
 
@@ -152,6 +160,49 @@ export class Storage {
       totalCostUSD += row.cost;
     }
     return { totalTokens, totalCostUSD, byModel };
+  }
+
+  /** 今日（本地日历日）累计消费 —— 预算控制的持久化依据 */
+  todayUsage(): { tokens: number; costUSD: number } {
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString();
+    const row = this.one<{ tokens: number; cost: number }>(
+      "SELECT COALESCE(SUM(tokens), 0) AS tokens, COALESCE(SUM(cost_usd), 0) AS cost FROM usage_log WHERE created_at >= ?",
+      start,
+    );
+    return { tokens: row?.tokens ?? 0, costUSD: row?.cost ?? 0 };
+  }
+
+  /* ------------------------------ Plan Cache ------------------------------ */
+
+  /** 命中计划缓存（相似目标跳过 planning，省一次强模型调用） */
+  getPlanCache(goalHash: string): { planJson: string; hits: number } | null {
+    const row = this.one<{ plan_json: string; hits: number }>(
+      "SELECT plan_json, hits FROM plan_cache WHERE goal_hash = ?",
+      goalHash,
+    );
+    if (!row) return null;
+    // LRU 语义：命中即刷新更新时间
+    this.db
+      .prepare("UPDATE plan_cache SET hits = hits + 1, updated_at = ? WHERE goal_hash = ?")
+      .run(new Date().toISOString(), goalHash);
+    return { planJson: row.plan_json, hits: row.hits + 1 };
+  }
+
+  putPlanCache(goalHash: string, planJson: string): void {
+    const now = new Date().toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO plan_cache (goal_hash, plan_json, hits, created_at, updated_at) VALUES (?, ?, 0, ?, ?)
+         ON CONFLICT(goal_hash) DO UPDATE SET plan_json = excluded.plan_json, updated_at = excluded.updated_at`,
+      )
+      .run(goalHash, planJson, now, now);
+  }
+
+  /** 惰性清理过期缓存（默认 30 天未被命中即失效） */
+  prunePlanCache(ttlMs = 30 * 24 * 3600 * 1000): number {
+    const cutoff = new Date(Date.now() - ttlMs).toISOString();
+    return Number(this.db.prepare("DELETE FROM plan_cache WHERE updated_at < ?").run(cutoff).changes);
   }
 
   /* ------------------------------ Tasks ------------------------------ */

@@ -1,10 +1,18 @@
 import { useEffect, useRef } from "react";
 import type { Task, TaskEvent } from "@openwork/types";
 
+/** 实时流式输出（与 App 中的 LiveStream 结构一致） */
+interface LiveStream {
+  streamId: string;
+  text: string;
+  done: boolean;
+}
+
 interface ActivityStreamProps {
   task: Task | null;
   events: TaskEvent[];
   connected: boolean;
+  streams: LiveStream[];
 }
 
 const EVENT_ICON: Record<string, string> = {
@@ -25,13 +33,14 @@ const EVENT_ICON: Record<string, string> = {
   "usage.recorded": "📊",
 };
 
-/** 活动流 —— 任务轨迹的可视化回放（N5：全程可审计） */
-export function ActivityStream({ task, events, connected }: ActivityStreamProps) {
+/** 活动流 —— 任务轨迹的可视化回放（N5：全程可审计）+ 实时流式输出 */
+export function ActivityStream({ task, events, connected, streams }: ActivityStreamProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const lastStreamLength = streams[streams.length - 1]?.text.length ?? 0;
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [events.length]);
+  }, [events.length, lastStreamLength]);
 
   return (
     <div className="activity-stream">
@@ -56,7 +65,9 @@ export function ActivityStream({ task, events, connected }: ActivityStreamProps)
             {task.error && <p className="stream-error">⚠ {task.error}</p>}
           </div>
           <div className="stream-body">
-            {events.length === 0 && <div className="stream-empty">等待第一个事件…</div>}
+            {events.length === 0 && streams.length === 0 && (
+              <div className="stream-empty">等待第一个事件…</div>
+            )}
             {events.map((event) => (
               <div key={event.id} className={`stream-item ${event.type}`}>
                 <span className="stream-icon">{EVENT_ICON[event.type] ?? "•"}</span>
@@ -68,6 +79,18 @@ export function ActivityStream({ task, events, connected }: ActivityStreamProps)
                     </span>
                   </div>
                   {event.detail && <pre className="stream-detail">{event.detail}</pre>}
+                </div>
+              </div>
+            ))}
+            {streams.map((stream) => (
+              <div key={stream.streamId} className={`stream-item streaming ${stream.done ? "done" : "active"}`}>
+                <span className="stream-icon">{stream.done ? "✓" : "⋯"}</span>
+                <div className="stream-content">
+                  <div className="stream-title">
+                    {stream.done ? "流式输出完成" : "正在实时生成…"}
+                    {!stream.done && <span className="stream-time pulse">LIVE</span>}
+                  </div>
+                  <pre className="stream-detail stream-live-text">{stream.text.slice(-2000)}</pre>
                 </div>
               </div>
             ))}

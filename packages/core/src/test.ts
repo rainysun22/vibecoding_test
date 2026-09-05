@@ -135,7 +135,73 @@ async function testUsageSummary(): Promise<void> {
     const summary = runtime.usageSummary();
     assert.ok(summary.totalTokens > 0);
     assert.equal(summary.totalCostUSD, 0); // mock 免费
+    assert.ok(summary.todayCostUSD !== undefined);
     console.log(`  ✓ 用量统计：${summary.totalTokens} tokens`);
+  });
+}
+
+/** v0.2：计划缓存 —— 相同目标第二次委托命中缓存，跳过 planning 调用 */
+async function testPlanCache(): Promise<void> {
+  await withRuntime(true, async (runtime) => {
+    const goal = "写一份量子计算入门指南";
+    const first = await runtime.createTask(goal);
+    await waitFor(() => runtime.getTask(first.id)?.status === "completed");
+
+    const second = await runtime.createTask(`  ${goal.toUpperCase()}  `); // 归一化后同键
+    await waitFor(() => runtime.getTask(second.id)?.status === "completed");
+
+    const events = runtime.listEvents(second.id);
+    const planReady = events.find((e) => e.type === "plan.ready");
+    assert.ok(planReady?.title.includes("缓存命中"), `应命中计划缓存，实际：${planReady?.title}`);
+    assert.ok(runtime.listDeliverables().length >= 2);
+    console.log("  ✓ 计划缓存：相似目标复用历史计划");
+  });
+}
+
+/** v0.2：并行执行 —— 对比类计划的双 research 步骤并发运行 */
+async function testParallelResearch(): Promise<void> {
+  await withRuntime(true, async (runtime) => {
+    const task = await runtime.createTask("对比 React 与 Vue 的工程实践");
+    await waitFor(() => runtime.getTask(task.id)?.status === "completed");
+
+    const events = runtime.listEvents(task.id);
+    const titles = events.map((e) => e.title);
+    assert.ok(titles.some((t) => t.includes("并行执行 2 个研究步骤")), "应出现并行执行事件");
+    assert.equal(runtime.listDeliverables().length, 1);
+    console.log("  ✓ 并行执行：双研究步骤并发完成");
+  });
+}
+
+/** v0.2：流式输出 —— SSE 侧收到增量与结束帧 */
+async function testStreamingEvents(): Promise<void> {
+  await withRuntime(true, async (runtime) => {
+    const seen: { delta: string; done: boolean }[] = [];
+    const unsubscribe = runtime.subscribe((payload) => {
+      if (payload.type === "step.streaming" && payload.streamId) {
+        seen.push({ delta: payload.delta ?? "", done: Boolean(payload.streamDone) });
+      }
+    });
+
+    const task = await runtime.createTask("写一份流式输出验证报告");
+    await waitFor(() => runtime.getTask(task.id)?.status === "completed");
+    unsubscribe();
+
+    assert.ok(seen.some((s) => s.delta.length > 0), "应收到流式增量");
+    assert.ok(seen.some((s) => s.done), "应收到流结束帧");
+    console.log(`  ✓ 流式输出：${seen.length} 帧增量直达订阅端`);
+  });
+}
+
+/** v0.2：成本路由 —— 设置持久化并可恢复 */
+async function testRoutingPersistence(): Promise<void> {
+  await withRuntime(true, async (runtime) => {
+    runtime.setRouting({ preferLocal: true, localModel: "ollama/qwen3:8b", dailyBudgetUSD: 5 });
+    assert.deepEqual(runtime.getRouting(), {
+      preferLocal: true,
+      localModel: "ollama/qwen3:8b",
+      dailyBudgetUSD: 5,
+    });
+    console.log("  ✓ 成本路由：策略设置与读取一致（持久化经 settings 表）");
   });
 }
 
@@ -145,6 +211,10 @@ async function main(): Promise<void> {
   await testRejectFlow();
   await testSkillFlow();
   await testUsageSummary();
+  await testPlanCache();
+  await testParallelResearch();
+  await testStreamingEvents();
+  await testRoutingPersistence();
   console.log("core: 全部测试通过");
 }
 

@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { Worker } from "node:worker_threads";
 import type {
   Checkpoint,
   DeliverableMeta,
@@ -9,8 +10,10 @@ import type {
   TaskEvent,
   TokenUsage,
 } from "@openwork/types";
+import type { CompletionRequest } from "@openwork/types";
 import type { LLMGateway } from "@openwork/llm-gateway";
 import { generateDeliverable } from "@openwork/deliverables";
+import type { GenerateInput, GenerateOutput } from "@openwork/deliverables";
 import { Storage } from "./storage.js";
 import { DeliverableStore } from "./deliverable-store.js";
 import type { EventBus } from "./events.js";
@@ -46,6 +49,13 @@ const emptyState = (): RunState => ({
   verification: null,
   deliverableApproved: false,
 });
+
+/** 流式增量节流间隔：兼顾首字延迟与 SSE 帧数 */
+const STREAM_FLUSH_MS = 100;
+/** worker 生成成果的超时保护 */
+const WORKER_TIMEOUT_MS = 60_000;
+/** 重格式（需 zip 打包，值得移出主线程） */
+const HEAVY_FORMATS = new Set(["docx", "xlsx", "pptx"]);
 
 export interface AgentOptions {
   /** 自动审批（演示/受信场景）。默认 false —— 语义级审批是核心信任机制 */
@@ -107,25 +117,37 @@ export class AgentRunner {
       ? `技能约束：${skill.name} —— ${skill.description}\n期望产出格式：${skill.outputFormat}${skill.planHints ? `\n计划提示：${skill.planHints}` : ""}`
       : "";
 
-    const planJson = await this.llm(
-      task.id,
-      "PLANNER",
-      [
-        {
-          role: "user",
-          content: `委托目标：${task.goal}\n${skillSection}\n请生成执行计划。`,
-        },
-      ],
-      "planning",
-    );
+    // 计划缓存：相似目标直接复用历史计划（省一次强模型调用，v0.2 成本优化）
+    const cacheKey = planCacheKey(task.goal, task.skillId);
+    const cached = this.storage.getPlanCache(cacheKey);
 
-    const plan = parsePlan(planJson, task.id);
+    let plan: Plan;
+    if (cached) {
+      plan = parsePlan(cached.planJson, task.id); // 复用解析器：重置步骤状态并兜底校验
+    } else {
+      const planJson = await this.llm(
+        task.id,
+        "PLANNER",
+        [
+          {
+            role: "user",
+            content: `委托目标：${task.goal}\n${skillSection}\n请生成执行计划。`,
+          },
+        ],
+        "planning",
+      );
+      plan = parsePlan(planJson, task.id);
+      this.storage.putPlanCache(cacheKey, JSON.stringify(plan));
+    }
+
     state.plan = plan;
     this.persist(task.id, state, "planning");
     this.emitEvent(
       task.id,
       "plan.ready",
-      `计划就绪：${plan.steps.length} 个步骤`,
+      cached
+        ? `计划就绪（缓存命中 ×${cached.hits}）：${plan.steps.length} 个步骤`
+        : `计划就绪：${plan.steps.length} 个步骤`,
       plan.steps.map((s, i) => `${i + 1}. ${s.title}`).join("\n"),
     );
 
@@ -158,6 +180,36 @@ export class AgentRunner {
     while (state.stepIndex < steps.length) {
       const step = steps[state.stepIndex];
       if (!step) break;
+
+      // 连续 research 步骤并行执行（v0.2 速度优化；研究之间本就无依赖）
+      if (step.kind === "research") {
+        const batch: PlanStep[] = [];
+        while (state.stepIndex + batch.length < steps.length) {
+          const next = steps[state.stepIndex + batch.length];
+          if (!next || next.kind !== "research") break;
+          batch.push(next);
+        }
+
+        for (const item of batch) {
+          this.emitEvent(task.id, "step.started", `步骤 ${steps.indexOf(item) + 1}/${steps.length}：${item.title}`);
+        }
+        if (batch.length > 1) {
+          this.emitEvent(task.id, "step.started", `并行执行 ${batch.length} 个研究步骤`);
+        }
+
+        const results = await Promise.all(batch.map((item) => this.executeStep(task, item, state)));
+        batch.forEach((item, index) => {
+          const result = results[index]!;
+          state.stepResults.push(result);
+          item.status = "done";
+          item.result = result.slice(0, 500);
+          state.stepIndex += 1;
+          this.emitEvent(task.id, "step.completed", `完成：${item.title}`, result.slice(0, 200));
+        });
+        this.persist(task.id, state, "executing");
+        continue;
+      }
+
       this.emitEvent(
         task.id,
         "step.started",
@@ -191,6 +243,7 @@ export class AgentRunner {
             },
           ],
           "execution",
+          { streamId: step.id },
         );
       }
       case "draft": {
@@ -217,6 +270,7 @@ export class AgentRunner {
             },
           ],
           "execution",
+          { streamId: step.id },
         );
         state.draft = content;
         return content;
@@ -352,10 +406,32 @@ export class AgentRunner {
       updatedAt: now,
     };
 
-    const output = await generateDeliverable({ title, markdown, format });
+    const output = await this.generateFile({ title, markdown, format });
     const version = this.store.save(meta, output, note);
     this.storage.createDeliverable(meta, version);
     return meta;
+  }
+
+  /**
+   * 成果文件生成：docx/xlsx/pptx 等 zip 重格式移入 worker 线程，
+   * 避免大文件打包阻塞主事件循环（SSE 心跳与流式输出不受影响）。
+   * worker 环境不可用时回退主线程生成。
+   */
+  private async generateFile(input: GenerateInput): Promise<GenerateOutput> {
+    if (!HEAVY_FORMATS.has(input.format)) {
+      return generateDeliverable(input);
+    }
+    try {
+      const output = await runWorker<GenerateOutput>(
+        new URL("./deliverable-worker.js", import.meta.url),
+        { input },
+        WORKER_TIMEOUT_MS,
+      );
+      // worker 传输后 Buffer 退化为 Uint8Array，恢复为 Buffer
+      return { ...output, data: Buffer.from(output.data) };
+    } catch {
+      return generateDeliverable(input);
+    }
   }
 
   private async makeTitle(goal: string): Promise<string> {
@@ -384,31 +460,90 @@ export class AgentRunner {
     marker: string,
     messages: { role: "user" | "assistant"; content: string }[],
     purpose: "planning" | "execution" | "verifying",
+    options: { streamId?: string } = {},
   ): Promise<string> {
     const model = this.gateway.modelForPurpose(purpose);
-    const response = await this.gateway.complete({
+    const request: CompletionRequest = {
       model,
       messages: [{ role: "system", content: systemPrompt(marker) }, ...messages],
       temperature: purpose === "execution" ? 0.7 : 0.2,
-    });
+    };
 
-    if (taskId) {
-      this.addUsage(taskId, response.usage);
-      this.bus.emit("usage.recorded", {
-        type: "usage.recorded",
-        taskId,
-        title: "用量记录",
-        detail: `${response.usage.totalTokens} tokens · $${response.usage.costUSD.toFixed(6)} · ${model}`,
-        at: new Date().toISOString(),
-        usage: {
-          model,
-          tokens: response.usage.totalTokens,
-          costUSD: response.usage.costUSD,
-        },
-      });
+    // 流式优先：正文/研究笔记逐字直达前端（首字延迟从秒级降到百毫秒级）
+    if (options.streamId) {
+      try {
+        return await this.streamWithEvents(taskId, options.streamId, model, request);
+      } catch {
+        // 流式失败（网络/适配器异常）→ 回退非流式，保证结果仍可交付
+      }
     }
 
+    const response = await this.gateway.complete(request);
+    this.accountUsage(taskId, model, response.usage);
     return response.content;
+  }
+
+  /** 流式执行：增量节流后经 EventBus 广播（不落库，避免事件表膨胀） */
+  private async streamWithEvents(
+    taskId: string,
+    streamId: string,
+    model: string,
+    request: CompletionRequest,
+  ): Promise<string> {
+    let content = "";
+    let pending = "";
+    let lastFlush = Date.now();
+    let usage: TokenUsage | undefined;
+
+    for await (const chunk of this.gateway.stream(request)) {
+      if (chunk.delta) {
+        content += chunk.delta;
+        pending += chunk.delta;
+        const now = Date.now();
+        if (now - lastFlush >= STREAM_FLUSH_MS) {
+          this.emitStreamDelta(taskId, streamId, pending);
+          pending = "";
+          lastFlush = now;
+        }
+      }
+      if (chunk.usage) usage = chunk.usage;
+      if (chunk.done) break;
+    }
+
+    if (pending) this.emitStreamDelta(taskId, streamId, pending);
+    this.emitStreamDelta(taskId, streamId, "", true);
+    if (usage) this.accountUsage(taskId, model, usage);
+    return content;
+  }
+
+  private emitStreamDelta(taskId: string, streamId: string, delta: string, done = false): void {
+    this.bus.emit("step.streaming", {
+      type: "step.streaming",
+      taskId,
+      title: done ? "流式输出完成" : "流式生成中",
+      at: new Date().toISOString(),
+      streamId,
+      delta,
+      streamDone: done,
+    });
+  }
+
+  /** 用量归集：任务台账累计 + 全局台账广播（成本透明） */
+  private accountUsage(taskId: string, model: string, usage: TokenUsage): void {
+    if (!taskId) return;
+    this.addUsage(taskId, usage);
+    this.bus.emit("usage.recorded", {
+      type: "usage.recorded",
+      taskId,
+      title: "用量记录",
+      detail: `${usage.totalTokens} tokens · $${usage.costUSD.toFixed(6)} · ${model}`,
+      at: new Date().toISOString(),
+      usage: {
+        model,
+        tokens: usage.totalTokens,
+        costUSD: usage.costUSD,
+      },
+    });
   }
 
   private addUsage(taskId: string, delta: TokenUsage): void {
@@ -480,6 +615,34 @@ function systemPrompt(marker: string): string {
 }
 
 /* ------------------------------ 工具函数 ------------------------------ */
+
+/** 计划缓存键：目标归一化（大小写/空白）+ 技能约束 一起哈希 */
+function planCacheKey(goal: string, skillId?: string): string {
+  const normalized = goal.trim().toLowerCase().replace(/\s+/g, " ");
+  return createHash("sha256").update(`${normalized}\n${skillId ?? ""}`).digest("hex");
+}
+
+/** 在 worker 线程执行任务并取回结果（带超时保护；异常向上抛出由调用方兜底） */
+function runWorker<T>(url: URL, data: unknown, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(url, { workerData: data });
+    const timer = setTimeout(() => {
+      void worker.terminate();
+      reject(new Error(`worker 超时（${timeoutMs}ms）`));
+    }, timeoutMs);
+
+    worker.on("message", (message: { ok: boolean; output?: T; error?: string }) => {
+      clearTimeout(timer);
+      void worker.terminate();
+      if (message.ok && message.output !== undefined) resolve(message.output);
+      else reject(new Error(message.error ?? "worker 执行失败"));
+    });
+    worker.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
 
 function parsePlan(json: string, taskId: string): Plan {
   const cleaned = extractJson(json);

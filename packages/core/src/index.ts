@@ -11,7 +11,7 @@ import type {
   TaskEvent,
   UsageSummary,
 } from "@openwork/types";
-import { LLMGateway } from "@openwork/llm-gateway";
+import { LLMGateway, type RoutingConfig } from "@openwork/llm-gateway";
 import { Storage } from "./storage.js";
 import { DeliverableStore } from "./deliverable-store.js";
 import { AgentRunner } from "./agent.js";
@@ -51,6 +51,9 @@ export class OpenWorkRuntime {
 
     // 恢复持久化的模型网关配置
     this.restoreGatewaySettings();
+    // 恢复当日预算累计（重启不重置预算周期）+ 惰性清理过期计划缓存
+    this.gateway.restoreSpentToday(this.storage.todayUsage().costUSD);
+    this.storage.prunePlanCache();
 
     this.agent = new AgentRunner(
       this.storage,
@@ -230,6 +233,19 @@ export class OpenWorkRuntime {
     this.storage.setSetting("plannerModel", this.gateway.plannerModel);
   }
 
+  /* ------------------------------ 成本路由 ------------------------------ */
+
+  /** 当前路由策略（本地优先 / 预算上限） */
+  getRouting(): RoutingConfig {
+    return this.gateway.routing;
+  }
+
+  setRouting(patch: Partial<RoutingConfig>): RoutingConfig {
+    const next = this.gateway.setRouting(patch);
+    this.storage.setSetting("routing", JSON.stringify(next));
+    return next;
+  }
+
   async testProvider(id: ProviderId): Promise<boolean> {
     return this.gateway.testProvider(id);
   }
@@ -255,6 +271,14 @@ export class OpenWorkRuntime {
       this.gateway.defaultModel = defaultModel;
       this.gateway.plannerModel = this.storage.getSetting("plannerModel") ?? defaultModel;
     }
+    const routing = this.storage.getSetting("routing");
+    if (routing) {
+      try {
+        this.gateway.setRouting(JSON.parse(routing) as Partial<RoutingConfig>);
+      } catch {
+        // 忽略损坏的配置
+      }
+    }
   }
 
   /* ------------------------------ 统计 ------------------------------ */
@@ -265,6 +289,7 @@ export class OpenWorkRuntime {
       totalTasks: this.storage.listTasks(10_000).length,
       totalTokens,
       totalCostUSD,
+      todayCostUSD: this.storage.todayUsage().costUSD,
       byProvider: byModel,
     };
   }

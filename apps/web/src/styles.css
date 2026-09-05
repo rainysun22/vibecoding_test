@@ -893,3 +893,83 @@ body {
     flex: 1;
   }
 }
+
+/* ------------------------------ v0.2：流式输出与成本路由 ------------------------------ */
+
+/* 活动流中的实时流式卡片 */
+.stream-item.streaming {
+  border-left: 2px solid var(--accent, #27d2bf);
+}
+
+.stream-item.streaming.done {
+  border-left-color: var(--border);
+}
+
+.stream-live-text {
+  color: var(--text);
+  max-height: 240px;
+}
+
+.stream-time.pulse {
+  color: #27d2bf;
+  animation: pulse-live 1.2s ease-in-out infinite;
+  font-weight: 600;
+}
+
+@keyframes pulse-live {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stream-time.pulse {
+    animation: none;
+  }
+}
+
+/* 设置弹窗：本地优先与预算表单 */
+.routing-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.routing-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.routing-form select,
+.routing-form input[type="number"] {
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+.routing-form .check-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.routing-form .check-row input {
+  accent-color: #27d2bf;
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+}
