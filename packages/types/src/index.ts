@@ -148,7 +148,11 @@ export type TaskEventType =
   | "playbook.saved"
   | "context.compacted"
   | "refine.looping"
-  | "refine.completed";
+  | "refine.completed"
+  /* v0.7：自适应重规划 / 证据缺口审计 */
+  | "replan.looping"
+  | "replan.completed"
+  | "evidence.audited";
 
 /** 一句话委托 */
 export interface Task {
@@ -275,6 +279,30 @@ export interface SourceMaterial {
   kind: "web" | "file";
   source: string;
   content: string;
+}
+
+/* ============================== Evidence Audit ============================== */
+
+/** 证据缺口审计的单条结论（"这条论断"由哪些来源支撑 / 是否存疑） */
+export interface EvidenceFinding {
+  /** 被审计的论断（成果中的一条核心断言） */
+  claim: string;
+  /** 支撑该论断的真实来源；为空 = 无证据支撑（缺口） */
+  supportedBy: string[];
+  /** 缺口原因（unsupported 无来源 / partial 部分支撑 / contradiction 来源冲突不可辨） */
+  gap?: "unsupported" | "partial" | "contradiction";
+}
+
+/** 证据缺口审计结果：交付物所有论断 ↔ 已采集证据的覆盖对照（arXiv:2512.20237 MemR3） */
+export interface EvidenceAudit {
+  id: string;
+  taskId: string;
+  findings: EvidenceFinding[];
+  /** 缺口数（无/弱支撑的论断数） */
+  gapCount: number;
+  /** 有缺口的章节 */
+  gapChapters: string[];
+  at: string;
 }
 
 /* ============================== Knowledge Base ============================== */

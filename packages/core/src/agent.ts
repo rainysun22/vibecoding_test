@@ -4,6 +4,8 @@ import type {
   Checkpoint,
   ConfidenceRecord,
   DeliverableMeta,
+  EvidenceAudit,
+  EvidenceFinding,
   Playbook,
   Plan,
   PlanStep,
@@ -68,6 +70,10 @@ interface RunState {
   resampled?: string[];
   /** v0.5：批判-精炼循环是否已执行过（有界循环：至多一轮） */
   refined?: boolean;
+  /** v0.7：自适应重规划是否已执行过（有界：至多一轮，防无限扩调研） */
+  replanned?: boolean;
+  /** v0.7：证据缺口审计结果（交付前可信度对照；供审批/前端展示） */
+  audit?: EvidenceAudit;
 }
 
 const emptyState = (): RunState => ({
@@ -804,10 +810,42 @@ export class AgentRunner {
             .join("\n")}`
         : "";
     const verdict = await this.verifyDraft(task, draft, weakSection);
+    let critique = parseVerdict(verdict);
+    let current = verdict;
+
+    // 自适应重规划（v0.7，arXiv:2603.11445）：校验发现完整性缺口（某方面缺调研覆盖）
+    // → 生成新子问题补充调研 → 重聚合完整正文。先于局部打磨，因为缺口「补」比「改」优先。
+    // 有界：至多一轮，缺口头一次至多 4 个，防无限扩调研。
+    if (critique.needsResearch && critique.missingAspects.length > 0 && !state.replanned) {
+      state.replanned = true;
+      this.emitEvent(
+        task.id,
+        "replan.looping",
+        `自适应重规划：检测到 ${critique.missingAspects.length} 处调研缺口，补充调研后重写`,
+        critique.missingAspects.map((m, i) => `${i + 1}. ${m}`).join("\n"),
+      );
+
+      const supplemented = await this.runSupplementaryResearch(task, state, critique.missingAspects);
+      state.draft = await this.aggregateWithResearch(task, state, supplemented);
+      await this.rerenderDeliverable(
+        task,
+        state,
+        `自适应重规划 v${(this.storage.getDeliverable(state.deliverableId ?? "")?.version ?? 1) + 1}：补齐 ${critique.missingAspects.length} 处调研缺口`,
+      );
+
+      const reVerdict = await this.verifyDraft(task, state.draft, weakSection);
+      current = reVerdict;
+      critique = parseVerdict(reVerdict);
+      this.emitEvent(
+        task.id,
+        "replan.completed",
+        `缺口已补齐并复检：${summarizeVerification(current)}`,
+        critique.missingAspects.length > 0 ? `仍存在缺口：${critique.missingAspects.join("、")}` : "本轮缺口已全部覆盖",
+      );
+    }
 
     // 批判-精炼循环（v0.5，arXiv:2506.18096）：校验判定 revise 且给出结构化批评时，
     // 带批评重写正文并复检 —— 批评即改进方向。有界循环：至多一轮，防成本爆炸。
-    const critique = parseVerdict(verdict);
     if (critique.needsRevision && critique.issues.length > 0 && !state.refined) {
       state.refined = true;
       this.emitEvent(
@@ -825,7 +863,7 @@ export class AgentRunner {
             role: "user",
             content: [
               `委托目标：${task.goal}`,
-              `待改进正文：\n${draft.slice(0, 16_000)}`,
+              `待改进正文：\n${(state.draft ?? draft).slice(0, 16_000)}`,
               `校验批评（逐条落实，其余保留）：\n${critique.issues.map((issue, i) => `${i + 1}. ${issue}`).join("\n")}`,
               "请输出改进后的完整正文（Markdown）。",
             ].join("\n\n"),
@@ -837,16 +875,32 @@ export class AgentRunner {
       await this.rerenderDeliverable(task, state, `批判-精炼 v${(this.storage.getDeliverable(state.deliverableId ?? "")?.version ?? 1) + 1}：依据校验批评改进`);
 
       const reVerdict = await this.verifyDraft(task, refined, weakSection);
-      state.verification = reVerdict;
+      current = reVerdict;
       this.emitEvent(
         task.id,
         "refine.completed",
         `精炼完成并复检：${summarizeVerification(reVerdict)}`,
         `初检批评：\n${critique.issues.map((issue, i) => `${i + 1}. ${issue}`).join("\n")}`,
       );
-    } else {
-      state.verification = verdict;
     }
+    state.verification = current;
+
+    // 证据缺口审计（v0.7，arXiv:2512.20237 MemR3）：交付前把「成果论断 ↔ 已采集证据」
+    // 逐条对照，标出无/弱支撑的缺口并追加为可信度附录 —— 让人一眼看到哪些结论可信、哪些存疑。
+    // 只在存在缺口时追加（无缺口不污染成果）；对已有 audit 的结果不重复计。
+    // skip 修订任务：修订版是确定性改稿（git 语义"一版一修订"），审计版本不混入其版本链。
+    if (!state.audit && !task.revisionOf) {
+      const audit = await this.runEvidenceAudit(task, state, state.draft ?? draft);
+      state.audit = audit;
+      if (audit.gapCount > 0) {
+        await this.rerenderDeliverable(
+          task,
+          state,
+          `证据审计 v${(this.storage.getDeliverable(state.deliverableId ?? "")?.version ?? 1) + 1}：标注 ${audit.gapCount} 处证据缺口`,
+        );
+      }
+    }
+
     this.persist(task.id, state, "verifying");
     this.emitEvent(task.id, "task.verifying", "质量校验完成", state.verification.slice(0, 300));
 
@@ -882,7 +936,7 @@ export class AgentRunner {
             `委托目标：${task.goal}`,
             `成果正文${skeleton !== draft ? "（已骨架化摘要）" : ""}：\n${skeleton}`,
             weakSection,
-            "请校验成果是否满足委托目标，输出 JSON：{verdict, score, strengths[], issues[]}",
+            "请校验成果是否满足委托目标，输出 JSON：{verdict, score, strengths[], issues[], needsResearch, missingAspects[]}",
           ]
             .filter(Boolean)
             .join("\n\n"),
@@ -893,12 +947,120 @@ export class AgentRunner {
   }
 
   /**
+   * 补充调研（v0.7 自适应重规划）：为每个缺口方面跑一轮研究步骤 + 采集来源。
+   * 复用 RESEARCHER 角色与 collectSources 工具链 —— 新增材料并进 collectedSources，
+   * 保持「引用溯源只引真实采集来源」的不变量。缺口有界（至多 4 个）。
+   */
+  private async runSupplementaryResearch(task: Task, state: RunState, aspects: string[]): Promise<string> {
+    const notes: string[] = [];
+    for (const [index, aspect] of aspects.entries()) {
+      const step: PlanStep = {
+        id: `supp-${index}`,
+        kind: "research",
+        title: `补充调研：${aspect}`,
+        instruction: aspect,
+        status: "pending",
+        outputFormat: undefined,
+      };
+      const research = await this.llm(
+        task.id,
+        "RESEARCHER",
+        [
+          {
+            role: "user",
+            content: `补充调研委托：${aspect}\n委托总目标：${task.goal}`,
+          },
+        ],
+        "execution",
+      );
+      // 补充调研同样采集来源（进引用溯源），失败不阻断
+      const sources = await this.collectSources(task, step, state);
+      this.emitEvent(task.id, "step.completed", `补充调研完成：${aspect}`, `${research.length} 字符`);
+      notes.push(`【补充调研 ${index + 1}：${aspect}】\n${research}${sources ? `\n\n${sources}` : ""}`);
+    }
+    return notes.join("\n\n");
+  }
+
+  /** 重聚合（v0.7）：原正文 + 补充调研 → 完整新正文（SYNTHESIZER 消除重复、统一口径） */
+  private async aggregateWithResearch(task: Task, state: RunState, supplemented: string): Promise<string> {
+    const original = compactStepResult(state.draft ?? "", 8_000); // 骨架化原文，避免重复信息
+    return this.llm(
+      task.id,
+      "SYNTHESIZER",
+      [
+        {
+          role: "user",
+          content: [
+            `委托目标：${task.goal}`,
+            `已有机草稿：\n${original}`,
+            `补充调研成果（需并入正文并消除与草稿的重复）：\n${supplemented.slice(0, 16_000)}`,
+            this.clarificationSection(task.id),
+            this.steeringSection(state),
+            "请合并为一份覆盖完整、无重复、结构统一的完整正文（Markdown）。",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        },
+      ],
+      "execution",
+    );
+  }
+
+  /**
+   * 证据缺口审计（v0.7，arXiv:2512.20237 MemR3）：把成果论断与已采集来源逐条对照，
+   * 标出无支撑（unsupported）/ 部分支撑（partial）/ 来源冲突（contradiction）的缺口。
+   * AUDITOR 角色产出结构化审计；解析失败时将缺口整体降级为「无法审计」，不阻断交付。
+   */
+  private async runEvidenceAudit(task: Task, state: RunState, draft: string): Promise<EvidenceAudit> {
+    const sources = state.collectedSources;
+    const body = sources.length > 0
+      ? sources.map((s, i) => `${i + 1}. ${s.kind === "web" ? "网页" : "本地文件"}：${s.source}\n${compactStepResult(s.content, 3000)}`).join("\n\n")
+      : "（本任务未采集到任何外部来源）";
+    const result = await this.llm(
+      task.id,
+      "AUDITOR",
+      [
+        {
+          role: "user",
+          content: [
+            `委托目标：${task.goal}`,
+            `成果正文（骨架）：\n${compactStepResult(draft, 5_000)}`,
+            `已采集来源（引用溯源的唯一合法依据）：\n${body.slice(0, 12_000)}`,
+            "请逐条指出正文中每条核心论断是否有来源支撑，输出 JSON：{findings:[{claim, supportedBy[], gap?}]}；gap ∈ unsupported|partial|contradiction，supportedBy 只引用上方来源的编号或标题。",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+        },
+      ],
+      "verifying",
+    );
+
+    const audit = parseEvidenceAudit(result, task.id);
+    // 有缺口时记录事件供前端展示；可信度附录的追加由 rerenderDeliverable 统一负责（避免重复）
+    if (audit.gapCount > 0) {
+      this.emitEvent(
+        task.id,
+        "evidence.audited",
+        `证据审计：标记 ${audit.gapCount} 处证据缺口`,
+        audit.findings
+          .filter((f) => f.gap)
+          .map((f, i) => `${i + 1}. ${f.claim}（${gapLabel(f.gap!)}）`)
+          .join("\n"),
+      );
+    }
+    return audit;
+  }
+
+  /**
    * 精炼后的正文重新生成成果文件：追加新版本（成果 git 化 ——
    * v1 初稿 → v2 精炼版，审批时可直接 diff 两版差异）。
    */
   private async rerenderDeliverable(task: Task, state: RunState, note: string): Promise<void> {
     const meta = state.deliverableId ? this.storage.getDeliverable(state.deliverableId) : null;
-    const finalDraft = appendSourcesSection(state.draft ?? "", state.collectedSources);
+    // 若已做证据审计，最终版把可信度附录带上（sources 之后）
+    const finalDraft = state.audit && state.audit.gapCount > 0
+      ? appendAuditSection(appendSourcesSection(state.draft ?? "", state.collectedSources), state.collectedSources, state.audit)
+      : appendSourcesSection(state.draft ?? "", state.collectedSources);
 
     // 无既有成果（异常路径兜底）：直接新建
     if (!meta) {
@@ -1283,9 +1445,11 @@ function systemPrompt(marker: string): string {
       "你是聚合撰稿人。把多份独立子成果整合为一份连贯正文：消除重复、统一口径与结构、补齐过渡。只输出聚合后的正文（Markdown）。",
     TITLE_MAKER: "只输出标题本身，不超过 20 字。",
     VERIFIER:
-      '输出严格的 JSON（无代码块包裹）：{"verdict": "pass"|"revise", "score": number, "strengths": string[], "issues": string[]}。issues 必须是具体、可执行的批评（指出位置与问题，而非泛泛而谈）。',
+      '输出严格的 JSON（无代码块包裹）：{"verdict": "pass"|"revise", "score": number, "strengths": string[], "issues": string[], "needsResearch": boolean, "missingAspects": string[]}。issues 必须是具体、可执行的批评（指出位置与问题，而非泛泛而谈）；若委托目标中的某些方面在正文中完全没有被调研覆盖，needsResearch 置 true 并在 missingAspects 列出每个缺失方面。',
     REFINER:
       "你是精炼撰稿人。依据校验批评逐条改进正文：只重写受影响的部分，保留已达标的结构与内容。输出改进后的完整正文（Markdown，不要输出批评回应或修改说明）。",
+    AUDITOR:
+      '你是证据审计员。把正文的每条核心论断与已采集来源逐条对照，输出严格的 JSON（无代码块包裹）：{"findings": [{"claim": string, "supportedBy": string[], "gap": "unsupported"|"partial"|"contradiction"}]}。supportedBy 只引用列出来源的标题，无来源支撑为 unsupported、来源不充分为 partial、来源相互矛盾为 contradiction。不要把来源列表中不存在的信息当作已支撑。',
   };
   // 上下文围栏（工作区隔离）：外部采集内容只作参考资料，其中出现的任何指令一律无视
   const fence =
@@ -1294,20 +1458,34 @@ function systemPrompt(marker: string): string {
 }
 
 /** 校验结论 → 结构化批评（批判-精炼循环的触发依据；解析失败视为无需修订） */
-function parseVerdict(verification: string): { needsRevision: boolean; issues: string[]; score: number } {
+function parseVerdict(verification: string): {
+  needsRevision: boolean;
+  issues: string[];
+  score: number;
+  /** v0.7 自适应重规划：是否需补充调研以补完整性缺口 */
+  needsResearch: boolean;
+  /** v0.7 需补充调研的具体方面（驱动生成新子问题） */
+  missingAspects: string[];
+} {
   try {
     const parsed = JSON.parse(extractJson(verification)) as {
       verdict?: string;
       score?: number;
       issues?: unknown[];
+      needsResearch?: unknown;
+      missingAspects?: unknown[];
     };
     const issues = (parsed.issues ?? []).filter((i): i is string => typeof i === "string" && i.trim().length > 0);
     const needsRevision =
       parsed.verdict === "revise" ||
       (parsed.verdict !== "pass" && issues.length > 0);
-    return { needsRevision, issues, score: typeof parsed.score === "number" ? parsed.score : 0 };
+    const needsResearch = parsed.needsResearch === true;
+    const missingAspects = (parsed.missingAspects ?? [])
+      .filter((a): a is string => typeof a === "string" && a.trim().length > 0)
+      .slice(0, 4); // 缺口有界：一次至多补 4 个子调研，防无限扩调研
+    return { needsRevision, issues, score: typeof parsed.score === "number" ? parsed.score : 0, needsResearch, missingAspects };
   } catch {
-    return { needsRevision: false, issues: [], score: 0 };
+    return { needsRevision: false, issues: [], score: 0, needsResearch: false, missingAspects: [] };
   }
 }
 
@@ -1350,6 +1528,63 @@ function appendSourcesSection(draft: string, sources: SourceMaterial[]): string 
     })
     .map((s, i) => `${i + 1}. ${s.kind === "web" ? "网页" : "本地文件"}：${s.source}`);
   return `${draft}\n\n---\n\n## 参考资料（真实采集来源）\n\n${lines.join("\n")}`;
+}
+
+/** 缺口类型 → 人话标签（证据审计附录展示） */
+function gapLabel(gap: NonNullable<EvidenceFinding["gap"]>): string {
+  switch (gap) {
+    case "unsupported": return "无来源支撑";
+    case "partial": return "仅部分支撑";
+    case "contradiction": return "来源冲突";
+  }
+}
+
+/** 证据缺口解析（解析失败时降级为"无法审计"，不阻断交付） */
+function parseEvidenceAudit(result: string, taskId: string): EvidenceAudit {
+  const id = randomUUID();
+  const at = new Date().toISOString();
+  try {
+    const parsed = JSON.parse(extractJson(result)) as {
+      findings?: Array<{ claim?: unknown; supportedBy?: unknown[]; gap?: unknown }>;
+    };
+    const findings: EvidenceFinding[] = (parsed.findings ?? [])
+      .map((f) => {
+        const claim = typeof f.claim === "string" ? f.claim.trim() : "";
+        const supportedBy = (f.supportedBy ?? [])
+          .filter((s): s is string => typeof s === "string" && s.trim().length > 0);
+        const gap = f.gap === "unsupported" || f.gap === "partial" || f.gap === "contradiction"
+          ? f.gap
+          : undefined;
+        if (!claim) return null;
+        return { claim, supportedBy, ...(gap ? { gap } : {}) };
+      })
+      .filter((f): f is EvidenceFinding => f !== null);
+    const gapped = findings.filter((f) => f.gap);
+    return { id, taskId, findings, gapCount: gapped.length, gapChapters: [], at };
+  } catch {
+    return { id, taskId, findings: [], gapCount: 0, gapChapters: [], at };
+  }
+}
+
+/** 证据缺口审计附录：正文尾追加「论断 ↔ 来源」对照，让人一眼看到哪些结论可信、哪些存疑 */
+function appendAuditSection(draft: string, sources: SourceMaterial[], audit: EvidenceAudit): string {
+  if (audit.gapCount === 0 || audit.findings.length === 0) return draft;
+  const row = (f: EvidenceFinding): string =>
+    f.gap
+      ? `- [待核实] **${f.claim}** —— ${gapLabel(f.gap)}${f.supportedBy.length ? `（疑似来源：${f.supportedBy.join("、")}）` : ""}`
+      : `- [已支撑] ${f.claim}`;
+  const gapN = Math.min(audit.gapCount, audit.findings.filter((f) => f.gap).length);
+  return [
+    draft,
+    "",
+    "---",
+    "",
+    `## 证据审计（第 ${gapN} 处论断缺少充分证据）`,
+    "",
+    "以下列出来源支撑核验结果：标 [待核实] 的结论请谨慎引用，建议补充来源或降低断言强度。",
+    "",
+    ...audit.findings.map(row),
+  ].join("\n");
 }
 
 /* ------------------------------ 工具函数 ------------------------------ */

@@ -271,23 +271,24 @@ async function testRevisionFlow(): Promise<void> {
     assert.ok(revision.revisionOf?.deliverableId === deliverable.id, "修订任务应关联原成果");
     await waitFor(() => runtime.getTask(revision.id)?.status === "completed");
 
-    // 版本链：同一成果追加 v2
-    const versions = runtime.listVersions(deliverable.id);
-    assert.equal(versions.length, 2);
-    assert.equal(versions[1]!.version, 2);
-    assert.equal(versions[1]!.note, "补充竞品对比章节，语气更正式");
-    assert.equal(runtime.getDeliverable(deliverable.id)!.version, 2);
+    // 版本链：主任务（初稿+审计）基础上追加修订版
+  const versions = runtime.listVersions(deliverable.id);
+  assert.equal(versions.length, 3);
+  const last = versions[versions.length - 1]!;
+  assert.equal(last.version, 3);
+  assert.equal(last.note, "补充竞品对比章节，语气更正式");
+  assert.equal(runtime.getDeliverable(deliverable.id)!.version, 3);
 
-    // 版本事件落库
-    const events = runtime.listEvents(revision.id);
-    assert.ok(events.some((e) => e.type === "deliverable.versioned"), "应出现版本化事件");
+  // 版本事件落库
+  const events = runtime.listEvents(revision.id);
+  assert.ok(events.some((e) => e.type === "deliverable.versioned"), "应出现版本化事件");
 
-    // 版本 diff：v1 → v2 有实际变更
-    const diff = runtime.diffDeliverable(deliverable.id, 1, 2);
-    assert.ok(diff.stat.added + diff.stat.removed > 0, "两版应有内容差异");
-    assert.equal(diff.from, 1);
-    assert.equal(diff.to, 2);
-    assert.ok(diff.lines.some((l) => l.type === "add" || l.type === "del"));
+  // 版本 diff：相邻两版有实际变更（审计版 → 修订版）
+  const diff = runtime.diffDeliverable(deliverable.id, 2, 3);
+  assert.ok(diff.stat.added + diff.stat.removed > 0, "两版应有内容差异");
+  assert.equal(diff.from, 2);
+  assert.equal(diff.to, 3);
+  assert.ok(diff.lines.some((l) => l.type === "add" || l.type === "del"));
 
     // diff 校验：不存在的版本应报错
     assert.throws(() => runtime.diffDeliverable(deliverable.id, 1, 99), /版本不存在/);
@@ -596,14 +597,18 @@ async function testRefineLoop(): Promise<void> {
       "循环事件应携带结构化批评",
     );
 
-    // 成果版本链：v1 初稿 → v2 精炼版（git 化 diff 的基础）
+    // 成果版本链：v1 初稿 → v2 精炼版 → v3 证据审计版（git 化 diff 的基础）
     const [deliverable] = runtime
       .listDeliverables()
       .filter((d) => d.taskId === task.id);
     assert.ok(deliverable, "应存在成果");
-    assert.equal(deliverable.version, 2, "精炼后应为 v2");
+    assert.equal(deliverable.version, 3, "精炼后为 v2、证据审计追加 v3");
     const versions = runtime.listVersions(deliverable.id);
-    assert.equal(versions.length, 2, "应有两条版本记录");
+    assert.equal(versions.length, 3, "应有三条版本记录");
+    assert.ok(
+      versions.some((v) => v.version === 3 && (v.note ?? "").includes("证据审计")),
+      "最新版本应为证据审计版",
+    );
 
     const file = runtime.readDeliverable(deliverable.id)!;
     assert.ok(
@@ -613,6 +618,10 @@ async function testRefineLoop(): Promise<void> {
     assert.ok(
       file.data.toString().includes("已落实："),
       "批评条目应被逐条落实回显",
+    );
+    assert.ok(
+      file.data.toString().includes("证据审计"),
+      "审计附录应追加到最终成果",
     );
 
     // 复检通过：最终校验结论为 pass

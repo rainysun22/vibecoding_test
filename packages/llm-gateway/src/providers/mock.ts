@@ -88,6 +88,7 @@ export class MockProvider implements LLMProvider {
 
     if (systemText.includes("PLANNER")) return mockPlan(goal);
     if (systemText.includes("VERIFIER")) return mockVerdict(goal, userText);
+    if (systemText.includes("AUDITOR")) return mockAudit(goal, userText);
     if (systemText.includes("REFINER")) return mockRefine(userText, goal);
     if (systemText.includes("SYNTHESIZER")) return mockSynthesis(userText, goal);
     if (systemText.includes("TITLE_MAKER")) return `「${goal}」深度成果报告`;
@@ -256,6 +257,23 @@ function mockBody(goal: string, systemText: string, userText?: string): string {
 }
 
 function mockVerdict(goal: string, userText: string): string {
+  // 自适应重规划（v0.7，arXiv:2603.11445）：目标含「缺口」标记 → 初检指出调研缺失，
+  // 触发 replan 补调研；复检（正文已含补充内容）→ pass。
+  const supplemented = userText.includes("补充调研");
+  if (/缺口|缺失|replan/i.test(goal) && !supplemented) {
+    return JSON.stringify(
+      {
+        verdict: "pass",
+        score: 70,
+        strengths: ["现有章节结构可用"],
+        issues: [],
+        needsResearch: true,
+        missingAspects: ["竞品海外生态现状", "政策与合规要点"],
+      },
+      null,
+      2,
+    );
+  }
   // 精炼闭环的确定性触发：目标含「精炼/revise」标记 → 初检 revise；
   // 重写后的正文带【已精炼】标记 → 复检 pass（测试可断言批判-精炼循环）
   const refined = userText.includes("【已精炼】");
@@ -290,6 +308,26 @@ function mockVerdict(goal: string, userText: string): string {
     null,
     2,
   );
+}
+
+/** 证据缺口审计：确定性输出 —— 回显来源命中，并标记无来源支撑的论断（测试可断言证据缺口链路） */
+function mockAudit(goal: string, userText: string): string {
+  const sources = [...userText.matchAll(/^(\d+)\.\s*(?:网页|本地文件)[:：]\s*(.+)$/gm)].map((m) => m[2]!.trim());
+  const hasSource = sources.length > 0;
+  const findings = [
+    {
+      claim: "工作台市场的主要玩家格局",
+      supportedBy: hasSource ? sources.slice(0, 1) : [],
+      gap: hasSource ? undefined : "unsupported",
+    },
+    {
+      claim: "成本优化的主流路径是模型路由",
+      supportedBy: hasSource ? sources.slice(0, 1) : [],
+      gap: hasSource ? undefined : "unsupported",
+    },
+  ];
+  const gapCount = findings.filter((f) => f.gap).length;
+  return JSON.stringify({ findings, gapCount, gapChapters: gapCount > 0 ? ["结论"] : [] }, null, 2);
 }
 
 /** 精炼输出：回显批评条目（集成测试可断言批评注入链路），带复检识别标记 */
